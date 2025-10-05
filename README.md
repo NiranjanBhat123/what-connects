@@ -147,33 +147,7 @@ docker-compose logs -f db
 docker-compose logs -f redis
 ```
 
-## 📊 API Endpoints
 
-### Authentication
-- `POST /api/v1/users/register/` - Register new user
-- `POST /api/v1/users/login/` - Login user
-- `POST /api/v1/users/token/refresh/` - Refresh JWT token
-
-### Rooms
-- `POST /api/v1/rooms/create/` - Create new game room
-- `POST /api/v1/rooms/join/` - Join existing room
-- `GET /api/v1/rooms/{room_code}/` - Get room details
-- `POST /api/v1/rooms/{room_code}/start/` - Start game (host only)
-
-### Games
-- `GET /api/v1/games/{game_id}/` - Get game details
-- `POST /api/v1/games/{game_id}/answer/` - Submit answer
-- `GET /api/v1/games/{game_id}/leaderboard/` - Get current leaderboard
-
-### WebSocket Events
-- `ws://localhost:8001/ws/room/{room_code}/` - Room WebSocket connection
-
-## 🎯 Game Scoring
-
-- **Correct Answer**: +10 points
-- **Correct Answer (with hint)**: +5 points
-- **Wrong Answer**: 0 points
-- **Wrong Answer (with hint)**: -5 points
 
 ## 🐳 Docker Commands
 
@@ -241,6 +215,6 @@ This project is licensed under the MIT License.
 
 ## 📧 Contact
 
-Your Name - your.email@example.com
+Your Name - bhatniranjan65@gmail.com
 
-Project Link: [https://github.com/yourusername/whatconnects](https://github.com/yourusername/whatconnects)
+
