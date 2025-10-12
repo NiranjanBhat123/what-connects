@@ -1,5 +1,5 @@
 """
-Game models for WhatConnects.
+Game models for WhatConnects - MCQ Format.
 """
 from django.db import models
 from django.conf import settings
@@ -107,13 +107,13 @@ class Game(UUIDModel, TimeStampedModel):
 
 
 class Question(UUIDModel, TimeStampedModel):
-    """Question model."""
+    """Question model for MCQ-based game."""
     game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name='questions')
     order = models.IntegerField(db_index=True)
-    text = models.TextField()
     items = models.JSONField()  # List of 4 items to connect
-    correct_answer = models.CharField(max_length=500)
-    hint = models.TextField(blank=True)
+    options = models.JSONField()  # List of 4 MCQ options
+    correct_answer = models.CharField(max_length=200)  # The correct option text
+    hint = models.TextField(blank=True)  # Subtle hint
     time_limit = models.IntegerField(default=30)  # seconds
 
     class Meta:
@@ -137,8 +137,18 @@ class Question(UUIDModel, TimeStampedModel):
         if len(self.items) != 4:
             raise ValidationError({'items': 'Must have exactly 4 items'})
 
+        if not isinstance(self.options, list):
+            raise ValidationError({'options': 'Options must be a list'})
+
+        if len(self.options) != 4:
+            raise ValidationError({'options': 'Must have exactly 4 options'})
+
         if not self.correct_answer.strip():
             raise ValidationError({'correct_answer': 'Answer cannot be empty'})
+
+        # Verify correct answer is in options
+        if self.correct_answer not in self.options:
+            raise ValidationError({'correct_answer': 'Correct answer must be one of the options'})
 
     def check_answer(self, answer_text):
         """
@@ -162,7 +172,7 @@ class Answer(UUIDModel, TimeStampedModel):
     """Answer submission model."""
     question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='answers')
     player = models.ForeignKey('users.Player', on_delete=models.CASCADE, related_name='answers')
-    answer_text = models.CharField(max_length=500)
+    answer_text = models.CharField(max_length=200)
     is_correct = models.BooleanField(default=False, db_index=True)
     used_hint = models.BooleanField(default=False, db_index=True)
     time_taken = models.IntegerField()  # seconds
@@ -183,41 +193,23 @@ class Answer(UUIDModel, TimeStampedModel):
 
     def calculate_points(self):
         """
-        Calculate points for this answer based on game settings.
-        Returns the points earned.
+        Calculate points for this answer based on game rules:
+        - Correct answer WITHOUT hint: +10 points
+        - Correct answer WITH hint: +5 points
+        - Wrong answer WITHOUT hint: 0 points
+        - Wrong answer WITH hint: -5 points
+        - No answer: 0 points
         """
-        # Default game settings if not configured
-        default_settings = {
-            'CORRECT_ANSWER_POINTS': 100,
-            'CORRECT_ANSWER_WITH_HINT_POINTS': 50,
-            'WRONG_ANSWER_POINTS': 0,
-            'WRONG_ANSWER_WITH_HINT_POINTS': -10,
-        }
-
-        game_settings = getattr(settings, 'GAME_SETTINGS', default_settings)
-
         if self.is_correct:
             if self.used_hint:
-                self.points_earned = game_settings.get(
-                    'CORRECT_ANSWER_WITH_HINT_POINTS',
-                    default_settings['CORRECT_ANSWER_WITH_HINT_POINTS']
-                )
+                self.points_earned = 5
             else:
-                self.points_earned = game_settings.get(
-                    'CORRECT_ANSWER_POINTS',
-                    default_settings['CORRECT_ANSWER_POINTS']
-                )
+                self.points_earned = 10
         else:
             if self.used_hint:
-                self.points_earned = game_settings.get(
-                    'WRONG_ANSWER_WITH_HINT_POINTS',
-                    default_settings['WRONG_ANSWER_WITH_HINT_POINTS']
-                )
+                self.points_earned = -5
             else:
-                self.points_earned = game_settings.get(
-                    'WRONG_ANSWER_POINTS',
-                    default_settings['WRONG_ANSWER_POINTS']
-                )
+                self.points_earned = 0
 
         self.save(update_fields=['points_earned', 'updated_at'])
         return self.points_earned
@@ -242,6 +234,7 @@ class GameScore(UUIDModel, TimeStampedModel):
     total_score = models.IntegerField(default=0, db_index=True)
     correct_answers = models.IntegerField(default=0)
     wrong_answers = models.IntegerField(default=0)
+    hints_used = models.IntegerField(default=0)
     rank = models.IntegerField(null=True, blank=True, db_index=True)
 
     objects = GameScoreManager()
@@ -278,12 +271,15 @@ class GameScore(UUIDModel, TimeStampedModel):
             self.correct_answers += 1
         else:
             self.wrong_answers += 1
-        self.save(update_fields=['total_score', 'correct_answers', 'wrong_answers', 'updated_at'])
+        if answer.used_hint:
+            self.hints_used += 1
+        self.save(update_fields=['total_score', 'correct_answers', 'wrong_answers', 'hints_used', 'updated_at'])
 
     def reset_score(self):
         """Reset score to zero (useful for game restarts)."""
         self.total_score = 0
         self.correct_answers = 0
         self.wrong_answers = 0
+        self.hints_used = 0
         self.rank = None
         self.save()

@@ -12,7 +12,7 @@ class QuestionSerializer(TimeStampedSerializer):
 
     class Meta:
         model = Question
-        fields = ['id', 'order', 'text', 'items', 'hint', 'time_limit', 'created_at', 'updated_at']
+        fields = ['id', 'order', 'items', 'options', 'correct_answer', 'hint', 'time_limit', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
@@ -21,7 +21,7 @@ class QuestionWithoutAnswerSerializer(TimeStampedSerializer):
 
     class Meta:
         model = Question
-        fields = ['id', 'order', 'text', 'items', 'hint', 'time_limit', 'created_at']
+        fields = ['id', 'order', 'items', 'options', 'hint', 'time_limit', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 
@@ -43,14 +43,18 @@ class GameScoreSerializer(TimeStampedSerializer):
     """Serializer for GameScore model."""
     player = PlayerSerializer(read_only=True)
     player_username = serializers.CharField(source='player.username', read_only=True)
+    accuracy = serializers.SerializerMethodField()
 
     class Meta:
         model = GameScore
         fields = [
             'id', 'player', 'player_username', 'total_score', 'correct_answers',
-            'wrong_answers', 'rank', 'created_at', 'updated_at'
+            'wrong_answers', 'hints_used', 'accuracy', 'rank', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_accuracy(self, obj):
+        return obj.accuracy
 
 
 class GameSerializer(TimeStampedSerializer):
@@ -95,7 +99,7 @@ class SubmitAnswerSerializer(serializers.Serializer):
     """Serializer for submitting an answer."""
     player_id = serializers.UUIDField()
     question_id = serializers.UUIDField()
-    answer_text = serializers.CharField(max_length=500, allow_blank=False)
+    answer_text = serializers.CharField(max_length=200, allow_blank=False)
     used_hint = serializers.BooleanField(default=False)
     time_taken = serializers.IntegerField(min_value=0)
 

@@ -3,7 +3,7 @@ Enhanced admin configuration for games app.
 """
 from django.contrib import admin
 from django.utils.html import format_html
-from django.db.models import Count, Avg, Q
+from django.db.models import Count, Avg
 from django.urls import reverse
 from ..core.admin import TimeStampedAdmin
 from .models import Game, Question, Answer, GameScore
@@ -14,21 +14,21 @@ class QuestionInline(admin.TabularInline):
     model = Question
     extra = 0
     readonly_fields = ['id', 'answer_count', 'correct_rate', 'created_at']
-    fields = ['order', 'text_preview', 'items_display', 'correct_answer', 'hint_display', 'time_limit', 'answer_count', 'correct_rate']
-
-    def text_preview(self, obj):
-        """Show truncated question text."""
-        if obj.text:
-            return obj.text[:50] + '...' if len(obj.text) > 50 else obj.text
-        return '-'
-    text_preview.short_description = 'Question'
+    fields = ['order', 'items_display', 'options_display', 'correct_answer', 'hint_display', 'time_limit', 'answer_count', 'correct_rate']
 
     def items_display(self, obj):
         """Display items as comma-separated list."""
         if obj.items:
-            return ', '.join(obj.items)
+            return ', '.join(str(item) for item in obj.items)
         return '-'
     items_display.short_description = 'Items'
+
+    def options_display(self, obj):
+        """Display MCQ options."""
+        if obj.options:
+            return ', '.join(str(opt) for opt in obj.options)
+        return '-'
+    options_display.short_description = 'Options'
 
     def hint_display(self, obj):
         """Show hint preview."""
@@ -64,8 +64,8 @@ class GameScoreInline(admin.TabularInline):
     """Inline admin for game scores with rankings."""
     model = GameScore
     extra = 0
-    readonly_fields = ['id', 'total_score', 'correct_answers', 'wrong_answers', 'accuracy_display', 'rank_display', 'created_at']
-    fields = ['player', 'total_score', 'correct_answers', 'wrong_answers', 'accuracy_display', 'rank_display']
+    readonly_fields = ['id', 'total_score', 'correct_answers', 'wrong_answers', 'hints_used', 'accuracy_display', 'rank_display', 'created_at']
+    fields = ['player', 'total_score', 'correct_answers', 'wrong_answers', 'hints_used', 'accuracy_display', 'rank_display']
 
     def accuracy_display(self, obj):
         """Display accuracy with color coding."""
@@ -187,9 +187,10 @@ class GameAdmin(TimeStampedAdmin):
 
         stats = obj.scores.aggregate(
             total_players=Count('id'),
-            avg_score=Avg('total_score'),
-            total_answers=Count('player__answers')
+            avg_score=Avg('total_score')
         )
+
+        total_answers = Answer.objects.filter(question__game=obj).count()
 
         return format_html(
             '<div style="background: #f8f9fa; padding: 15px; border-radius: 5px;">'
@@ -200,7 +201,7 @@ class GameAdmin(TimeStampedAdmin):
             '</div>',
             stats['total_players'] or 0,
             stats['avg_score'] or 0,
-            stats['total_answers'] or 0,
+            total_answers,
             obj.total_questions
         )
     game_stats.short_description = 'Statistics'
@@ -209,19 +210,19 @@ class GameAdmin(TimeStampedAdmin):
 @admin.register(Question)
 class QuestionAdmin(TimeStampedAdmin):
     """Enhanced admin interface for Question model."""
-    list_display = ['question_number', 'game_code', 'text_preview', 'items_count', 'has_hint', 'time_limit', 'answer_stats', 'created_at']
-    search_fields = ['text', 'correct_answer', 'game__room__code', 'hint']
+    list_display = ['question_number', 'game_code', 'items_preview', 'options_count', 'has_hint', 'time_limit', 'answer_stats', 'created_at']
+    search_fields = ['correct_answer', 'game__room__code', 'hint']
     list_filter = ['game__status', 'time_limit', 'created_at']
     readonly_fields = ['id', 'answer_statistics', 'created_at', 'updated_at']
     ordering = ['game', 'order']
 
     fieldsets = (
         ('Question Info', {
-            'fields': ('id', 'game', 'order', 'text')
+            'fields': ('id', 'game', 'order')
         }),
-        ('Items & Answer', {
-            'fields': ('items', 'correct_answer', 'hint'),
-            'description': 'Items should be a list of 4 related things'
+        ('Items & MCQ Options', {
+            'fields': ('items', 'options', 'correct_answer', 'hint'),
+            'description': 'Items should be a list of 4 related things. Options should be 4 MCQ choices.'
         }),
         ('Settings', {
             'fields': ('time_limit',)
@@ -250,21 +251,26 @@ class QuestionAdmin(TimeStampedAdmin):
         )
     game_code.short_description = 'Game'
 
-    def text_preview(self, obj):
-        """Show preview of question text."""
-        return obj.text[:60] + '...' if len(obj.text) > 60 else obj.text
-    text_preview.short_description = 'Question Text'
-
-    def items_count(self, obj):
-        """Display items as badges."""
+    def items_preview(self, obj):
+        """Show preview of items."""
         if obj.items:
+            preview = ', '.join(str(item)[:15] for item in obj.items[:2])
+            if len(obj.items) > 2:
+                preview += '...'
+            return preview
+        return '-'
+    items_preview.short_description = 'Items'
+
+    def options_count(self, obj):
+        """Display MCQ options as badges."""
+        if obj.options:
             items_html = ''.join([
-                f'<span style="background: #e3f2fd; padding: 2px 8px; margin: 2px; border-radius: 3px; display: inline-block; font-size: 11px;">{item[:20]}</span>'
-                for item in obj.items[:4]
+                f'<span style="background: {"#c8e6c9" if opt == obj.correct_answer else "#e3f2fd"}; padding: 2px 8px; margin: 2px; border-radius: 3px; display: inline-block; font-size: 11px;">{str(opt)[:15]}</span>'
+                for opt in obj.options[:4]
             ])
             return format_html(items_html)
         return '-'
-    items_count.short_description = 'Items'
+    options_count.short_description = 'MCQ Options'
 
     def has_hint(self, obj):
         """Show if hint exists."""
@@ -419,7 +425,7 @@ class AnswerAdmin(TimeStampedAdmin):
 @admin.register(GameScore)
 class GameScoreAdmin(TimeStampedAdmin):
     """Enhanced admin interface for GameScore model."""
-    list_display = ['rank_display', 'player_name', 'game_code', 'score_display', 'answers_display', 'accuracy_display', 'created_at']
+    list_display = ['rank_display', 'player_name', 'game_code', 'score_display', 'answers_display', 'hints_display', 'accuracy_display', 'created_at']
     search_fields = ['player__username', 'game__room__code']
     list_filter = ['rank', 'created_at', 'game__status']
     readonly_fields = ['id', 'score_breakdown', 'created_at', 'updated_at']
@@ -430,7 +436,7 @@ class GameScoreAdmin(TimeStampedAdmin):
             'fields': ('id', 'player', 'game')
         }),
         ('Score Details', {
-            'fields': ('total_score', 'correct_answers', 'wrong_answers', 'rank', 'score_breakdown')
+            'fields': ('total_score', 'correct_answers', 'wrong_answers', 'hints_used', 'rank', 'score_breakdown')
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
@@ -483,6 +489,11 @@ class GameScoreAdmin(TimeStampedAdmin):
         )
     answers_display.short_description = 'Answers'
 
+    def hints_display(self, obj):
+        """Display hints used."""
+        return format_html('💡 {}', obj.hints_used)
+    hints_display.short_description = 'Hints'
+
     def accuracy_display(self, obj):
         """Display accuracy with progress bar."""
         accuracy = obj.accuracy
@@ -501,8 +512,6 @@ class GameScoreAdmin(TimeStampedAdmin):
         if not obj.id:
             return '-'
 
-        answers = obj.player.answers.filter(question__game=obj.game)
-
         return format_html(
             '<div style="background: #f8f9fa; padding: 15px; border-radius: 5px;">'
             '<h3 style="margin-top: 0;">Score Breakdown</h3>'
@@ -511,13 +520,15 @@ class GameScoreAdmin(TimeStampedAdmin):
             '<tr><td style="padding: 8px;">Total Score</td><td style="padding: 8px; text-align: right; font-weight: bold; color: #4CAF50;">{}</td></tr>'
             '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Correct Answers</td><td style="padding: 8px; text-align: right; color: green;">{}</td></tr>'
             '<tr><td style="padding: 8px;">Wrong Answers</td><td style="padding: 8px; text-align: right; color: red;">{}</td></tr>'
-            '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Accuracy</td><td style="padding: 8px; text-align: right; font-weight: bold;">{:.1f}%</td></tr>'
-            '<tr><td style="padding: 8px;">Rank</td><td style="padding: 8px; text-align: right; font-weight: bold;">#{}</td></tr>'
+            '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Hints Used</td><td style="padding: 8px; text-align: right;">💡 {}</td></tr>'
+            '<tr><td style="padding: 8px;">Accuracy</td><td style="padding: 8px; text-align: right; font-weight: bold;">{:.1f}%</td></tr>'
+            '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Rank</td><td style="padding: 8px; text-align: right; font-weight: bold;">#{}</td></tr>'
             '</table>'
             '</div>',
             obj.total_score,
             obj.correct_answers,
             obj.wrong_answers,
+            obj.hints_used,
             obj.accuracy,
             obj.rank or '-'
         )

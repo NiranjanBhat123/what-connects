@@ -1,5 +1,5 @@
 """
-Room serializers.
+Room serializers - UPDATED VERSION
 """
 from rest_framework import serializers
 from ..core.serializers import TimeStampedSerializer
@@ -18,6 +18,14 @@ class RoomPlayerSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at']
 
 
+class CurrentGameSerializer(serializers.Serializer):
+    """Minimal serializer for current game reference."""
+    id = serializers.UUIDField(read_only=True)
+    status = serializers.CharField(read_only=True)
+    current_question_index = serializers.IntegerField(read_only=True)
+    total_questions = serializers.IntegerField(read_only=True)
+
+
 class RoomSerializer(TimeStampedSerializer):
     """Serializer for Room model."""
     host = PlayerSerializer(read_only=True)
@@ -25,13 +33,14 @@ class RoomSerializer(TimeStampedSerializer):
     player_count = serializers.SerializerMethodField()
     is_full = serializers.SerializerMethodField()
     can_start = serializers.SerializerMethodField()
+    current_game = CurrentGameSerializer(read_only=True)
 
     class Meta:
         model = Room
         fields = [
             'id', 'code', 'name', 'host', 'status', 'max_players',
             'player_count', 'is_full', 'can_start', 'players',
-            'created_at', 'updated_at'
+            'current_game', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'code', 'status', 'created_at', 'updated_at']
 

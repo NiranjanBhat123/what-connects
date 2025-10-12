@@ -1,6 +1,6 @@
 """
 WebSocket consumers for real-time game functionality.
-FIXED VERSION with proper room state including code field.
+FIXED VERSION with proper leaderboard timing and hint display.
 """
 import json
 import logging
@@ -16,6 +16,9 @@ from ..games.models import Game, Question, Answer, GameScore
 from .utils import connection_manager
 
 logger = logging.getLogger(__name__)
+
+# Simple in-memory timer tracking
+question_timers = {}
 
 
 class GameRoomConsumer(AsyncWebsocketConsumer):
@@ -187,7 +190,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             }))
             return
 
-        # Broadcast answer submission to room
+        # Broadcast answer submission to room (without leaderboard update)
         await self.channel_layer.group_send(
             self.room_group_name,
             {
@@ -202,6 +205,11 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                 'timestamp': self._get_timestamp()
             }
         )
+
+        # Check if all players have answered
+        all_answered = await self.check_all_players_answered(question_id)
+        if all_answered:
+            await self.broadcast_leaderboard_update()
 
     async def handle_start_game(self, data):
         """Handle game start request (host only)."""
@@ -227,6 +235,11 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                 'timestamp': self._get_timestamp()
             }
         )
+
+        # Start timer for first question
+        question_id = result['question']['id']
+        time_limit = result['question'].get('time_limit', 30)
+        await self.start_question_timer(question_id, time_limit)
 
     async def handle_next_question(self, data):
         """Handle next question request (host only)."""
@@ -265,6 +278,11 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                 }
             )
 
+            # Start timer for automatic leaderboard update
+            question_id = question_data['question']['id']
+            time_limit = question_data['question'].get('time_limit', 30)
+            await self.start_question_timer(question_id, time_limit)
+
     async def handle_chat_message(self, data):
         """Handle chat messages."""
         message = data.get('message', '').strip()
@@ -296,6 +314,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         hint = await self.get_hint(question_id)
 
         if hint:
+            # Send hint only to requesting player
             await self.send(text_data=json.dumps({
                 'type': 'hint',
                 'hint': hint,
@@ -312,6 +331,43 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             'timestamp': self._get_timestamp()
         }))
 
+    async def broadcast_leaderboard_update(self):
+        """Broadcast leaderboard update to all players."""
+        leaderboard = await self.get_current_leaderboard()
+
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                'type': 'leaderboard_update',
+                'leaderboard': leaderboard,
+                'timestamp': self._get_timestamp()
+            }
+        )
+
+    async def start_question_timer(self, question_id, duration):
+        """Start a timer to auto-update leaderboard after question time expires."""
+        import asyncio
+
+        timer_key = f"{self.room_code}_{question_id}"
+
+        # Cancel existing timer if any
+        if timer_key in question_timers:
+            question_timers[timer_key].cancel()
+
+        # Create timer task
+        async def timer_task():
+            try:
+                await asyncio.sleep(duration)
+                logger.info(f"Question timer expired for {timer_key}")
+                await self.broadcast_leaderboard_update()
+            except asyncio.CancelledError:
+                logger.info(f"Timer cancelled for {timer_key}")
+            finally:
+                if timer_key in question_timers:
+                    del question_timers[timer_key]
+
+        question_timers[timer_key] = asyncio.create_task(timer_task())
+
     # Event handlers for group messages
     async def player_joined(self, event):
         """Send player joined message to WebSocket."""
@@ -322,7 +378,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             'type': 'player_joined',
             'player_id': event['player_id'],
             'player_name': event['player_name'],
-            'room_state': room_state,  # Include updated state
+            'room_state': room_state,
             'timestamp': event['timestamp']
         }))
 
@@ -335,7 +391,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             'type': 'player_left',
             'player_id': event['player_id'],
             'player_name': event['player_name'],
-            'room_state': room_state,  # Include updated state
+            'room_state': room_state,
             'timestamp': event['timestamp']
         }))
 
@@ -407,6 +463,14 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             'timestamp': event['timestamp']
         }))
 
+    async def leaderboard_update(self, event):
+        """Send leaderboard update to WebSocket."""
+        await self.send(text_data=json.dumps({
+            'type': 'leaderboard_update',
+            'leaderboard': event['leaderboard'],
+            'timestamp': event['timestamp']
+        }))
+
     # Database operations
     @database_sync_to_async
     def verify_room_and_player(self):
@@ -447,18 +511,18 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def get_room_state(self):
-        """Get current room state with all players - FIXED to include code."""
+        """Get current room state with all players."""
         try:
             room = Room.objects.prefetch_related('players__player').get(code=self.room_code)
 
             return {
                 'id': str(room.id),
-                'code': room.code,  # CRITICAL: Must include code
+                'code': room.code,
                 'room_code': room.code,
                 'name': room.name,
                 'room_name': room.name,
                 'room_status': room.status,
-                'status': room.status,  # For compatibility
+                'status': room.status,
                 'max_players': room.max_players,
                 'can_start': room.can_start,
                 'host_id': str(room.host.id),
@@ -469,9 +533,9 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                 'players': [
                     {
                         'id': str(rp.player.id),
-                        'player_id': str(rp.player.id),  # For compatibility
+                        'player_id': str(rp.player.id),
                         'username': rp.player.username,
-                        'player_name': rp.player.username,  # For compatibility
+                        'player_name': rp.player.username,
                         'score': rp.score,
                         'is_ready': rp.is_ready,
                         'is_host': str(rp.player.id) == str(room.host.id)
@@ -489,7 +553,6 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         try:
             room = Room.objects.prefetch_related('players__player').get(code=self.room_code)
 
-            # Get active game
             try:
                 game = Game.objects.filter(
                     room=room,
@@ -502,8 +565,8 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                     question_data = {
                         'id': str(current_question.id),
                         'order': current_question.order,
-                        'text': current_question.text,
                         'items': current_question.items,
+                        'options': current_question.options,
                         'hint': current_question.hint if hasattr(current_question, 'hint') else None,
                         'time_limit': current_question.time_limit if hasattr(current_question, 'time_limit') else 30
                     }
@@ -551,18 +614,15 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             with transaction.atomic():
                 room = Room.objects.select_for_update().get(code=self.room_code)
 
-                # Check if game already exists
                 if Game.objects.filter(room=room, status='active').exists():
                     return {'error': 'Game already in progress'}
 
-                # Create new game
                 game = Game.objects.create(
                     room=room,
                     status='active',
                     current_question_index=0
                 )
 
-                # Get first question
                 first_question = game.current_question
                 if not first_question:
                     return {'error': 'No questions available'}
@@ -571,8 +631,9 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                     'question': {
                         'id': str(first_question.id),
                         'order': first_question.order,
-                        'text': first_question.text,
                         'items': first_question.items,
+                        'options': first_question.options,
+                        'hint': getattr(first_question, 'hint', ''),
                         'time_limit': getattr(first_question, 'time_limit', 30)
                     },
                     'total_questions': game.total_questions
@@ -594,7 +655,6 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                 player = Player.objects.get(id=self.player_id)
                 question = Question.objects.select_for_update().get(id=question_id, game=game)
 
-                # Check if already answered
                 existing_answer = Answer.objects.select_for_update().filter(
                     question=question,
                     player=player
@@ -610,10 +670,8 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                         'already_answered': True
                     }
 
-                # Check answer
                 is_correct = question.check_answer(answer)
 
-                # Create answer
                 answer_obj = Answer.objects.create(
                     question=question,
                     player=player,
@@ -623,10 +681,8 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                     time_taken=max(0, int(time_taken))
                 )
 
-                # Calculate points
                 points = answer_obj.calculate_points()
 
-                # Update game score
                 game_score, created = GameScore.objects.get_or_create(
                     game=game,
                     player=player,
@@ -634,7 +690,6 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                 )
                 game_score.update_score(answer_obj)
 
-                # Update RoomPlayer score
                 room_player = RoomPlayer.objects.get(room=room, player=player)
                 room_player.score = game_score.total_score
                 room_player.save()
@@ -656,6 +711,45 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             return {'error': 'Failed to check answer', 'player_name': 'Unknown', 'is_correct': False}
 
     @database_sync_to_async
+    def check_all_players_answered(self, question_id):
+        """Check if all players in the room have answered the current question."""
+        try:
+            room = Room.objects.prefetch_related('players__player').get(code=self.room_code)
+            game = Game.objects.get(room=room, status='active')
+            question = Question.objects.get(id=question_id, game=game)
+
+            total_players = room.players.count()
+            answered_count = Answer.objects.filter(question=question).count()
+
+            return answered_count >= total_players
+        except ObjectDoesNotExist:
+            return False
+
+    @database_sync_to_async
+    def get_current_leaderboard(self):
+        """Get current leaderboard for the game."""
+        try:
+            room = Room.objects.get(code=self.room_code)
+            game = Game.objects.get(room=room, status='active')
+
+            scores = GameScore.objects.filter(game=game).select_related('player').order_by(
+                '-total_score', 'created_at'
+            )
+
+            return [
+                {
+                    'player_id': str(score.player.id),
+                    'player_name': score.player.username,
+                    'total_score': score.total_score,
+                    'correct_answers': score.correct_answers,
+                    'wrong_answers': score.wrong_answers
+                }
+                for score in scores
+            ]
+        except ObjectDoesNotExist:
+            return []
+
+    @database_sync_to_async
     def get_next_question(self):
         """Get the next question."""
         try:
@@ -663,11 +757,9 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                 room = Room.objects.select_for_update().get(code=self.room_code)
                 game = Game.objects.select_for_update().get(room=room, status='active')
 
-                # Move to next question
                 next_q = game.next_question()
 
                 if next_q is None:
-                    # Game complete
                     game.status = 'completed'
                     game.save()
                     return {'game_complete': True}
@@ -676,8 +768,8 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                     'question': {
                         'id': str(next_q.id),
                         'order': next_q.order,
-                        'text': next_q.text,
                         'items': next_q.items,
+                        'options': next_q.options,
                         'hint': getattr(next_q, 'hint', None),
                         'time_limit': getattr(next_q, 'time_limit', 30),
                         'correct_answer': next_q.correct_answer

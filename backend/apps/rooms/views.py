@@ -74,7 +74,7 @@ class RoomCreateView(generics.CreateAPIView):
 
 class RoomDetailView(generics.RetrieveAPIView):
     """Get room details by code."""
-    queryset = Room.objects.prefetch_related('players__player')
+    queryset = Room.objects.prefetch_related('players__player').select_related('current_game')
     serializer_class = RoomSerializer
     permission_classes = [AllowAny]
     lookup_field = 'code'
@@ -82,7 +82,7 @@ class RoomDetailView(generics.RetrieveAPIView):
     def get_object(self):
         code = self.kwargs.get('code')
         room = get_object_or_404(
-            Room.objects.prefetch_related('players__player'),
+            Room.objects.prefetch_related('players__player').select_related('current_game'),
             code=code
         )
         return room
@@ -279,7 +279,7 @@ class RoomStartGameView(APIView):
             # Get first question for broadcasting
             first_question = game.current_question
 
-            # Broadcast game start via WebSocket - CRITICAL
+            # Broadcast game start via WebSocket - CRITICAL - FIXED
             channel_layer = get_channel_layer()
             if channel_layer and first_question:
                 from asgiref.sync import async_to_sync
@@ -289,8 +289,9 @@ class RoomStartGameView(APIView):
                     'question': {
                         'id': str(first_question.id),
                         'order': first_question.order,
-                        'text': first_question.text,
+                        # FIXED: Use 'items' and 'options' instead of 'text'
                         'items': first_question.items,
+                        'options': first_question.options,
                         'hint': first_question.hint if first_question.hint else '',
                         'time_limit': first_question.time_limit if first_question.time_limit else 30
                     },

@@ -152,9 +152,15 @@ export default function RoomLobbyPage() {
             // CRITICAL: Set flag to prevent cleanup
             isInitialized.current = false;
 
-            // Navigate immediately - GamePlayPage will handle WebSocket
+             // Navigate WITH the question data in state
             console.log('Navigating to game page...');
-            navigate(`/game/${code}`, { replace: true });
+            navigate(`/game/${code}`, {
+                replace: true,
+                state: {
+                    question: data.question,
+                    totalQuestions: data.totalQuestions
+                }
+            });
         });
 
         // Handle game state updates

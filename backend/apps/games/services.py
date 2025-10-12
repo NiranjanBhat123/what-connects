@@ -1,5 +1,5 @@
 """
-Game services for question generation.
+Game services for question generation - MCQ Format.
 """
 import json
 import logging
@@ -103,28 +103,44 @@ class QuestionGeneratorService:
 
     def _build_prompt(self, num_questions: int) -> str:
         """Build the prompt for Gemini AI."""
-        return f"""Generate {num_questions} "What Connects" quiz questions. Each question should have:
-- 4 items that share a common connection
-- A clear, concise answer explaining what connects them
-- An optional hint (can be empty string if no hint needed)
+        return f"""Generate {num_questions} "What Connects" MCQ quiz questions. 
 
-IMPORTANT: Make sure all items in a question are related to the same answer.
+The game format:
+- Show 4 items (words/short phrases) that have a common connection
+- Players must identify the connection from 4 multiple choice options
+- 1 correct answer, 3 plausible wrong answers
+- A subtle hint that helps but doesn't give away the answer
 
-Format as a JSON array ONLY (no markdown, no explanations):
+Example question:
+Items: ["Newton", "Steve Jobs", "Adam and Eve", "A forbidden fruit"]
+Options: ["Apple", "Microsoft", "Garden", "Gravity"]
+Correct Answer: "Apple"
+Hint: "This connects a tech giant, biblical story, physics, and fruit"
+
+Another example:
+Items: ["Superman", "Batman", "Wonder Woman", "The Flash"]
+Options: ["DC Comics", "Marvel", "Avengers", "X-Men"]
+Correct Answer: "DC Comics"
+Hint: "A comic book universe known for dark, serious superhero films"
+
+Format as JSON array ONLY (no markdown, no explanations):
 [
   {{
     "items": ["item1", "item2", "item3", "item4"],
-    "answer": "what connects them",
-    "hint": "optional hint or empty string"
+    "options": ["option1", "option2", "option3", "option4"],
+    "correct_answer": "option1",
+    "hint": "subtle hint that helps narrow down"
   }}
 ]
 
 Guidelines:
-- Make questions varied and interesting across different topics (history, pop culture, science, geography, sports, entertainment, etc.)
-- Ensure the connection is clear but not too obvious
-- Keep answers concise (under 100 characters)
-- Make hints helpful but not give away the answer
-- Avoid offensive or controversial topics
+- Make questions varied across topics (pop culture, history, geography, science, sports, brands, entertainment)
+- Ensure all 4 items genuinely connect to the answer
+- Make wrong options plausible but clearly incorrect when thought through
+- Hints should be helpful but not obvious - they narrow possibilities without revealing
+- Correct answer must be one of the 4 options (exact match)
+- Keep items and options concise (1-4 words each)
+- Difficulty: Medium (not too easy, not impossible)
 
 Return ONLY the JSON array, nothing else."""
 
@@ -155,41 +171,54 @@ Return ONLY the JSON array, nothing else."""
     def _validate_questions_data(self, questions_data: List[Dict[str, Any]], expected_count: int):
         """Validate the questions data structure."""
         if len(questions_data) < expected_count:
-            logger.error(
+            logger.warning(
                 f"Generated {len(questions_data)} questions, expected {expected_count}"
-            )
-            raise QuestionGenerationException(
-                f"Insufficient questions generated. Expected {expected_count}, got {len(questions_data)}."
             )
 
         for idx, q_data in enumerate(questions_data):
             if not isinstance(q_data, dict):
                 raise QuestionGenerationException(f"Question {idx} is not a dictionary")
 
-            if 'items' not in q_data or 'answer' not in q_data:
-                raise QuestionGenerationException(
-                    f"Question {idx} missing required fields (items, answer)"
-                )
+            required_fields = ['items', 'options', 'correct_answer']
+            for field in required_fields:
+                if field not in q_data:
+                    raise QuestionGenerationException(
+                        f"Question {idx} missing required field: {field}"
+                    )
 
+            # Validate items (4 items)
             if not isinstance(q_data['items'], list) or len(q_data['items']) != 4:
                 raise QuestionGenerationException(
                     f"Question {idx} must have exactly 4 items"
                 )
 
-            # Validate all items are non-empty strings
+            # Validate options (4 options)
+            if not isinstance(q_data['options'], list) or len(q_data['options']) != 4:
+                raise QuestionGenerationException(
+                    f"Question {idx} must have exactly 4 options"
+                )
+
+            # Validate all items and options are non-empty strings
             for item_idx, item in enumerate(q_data['items']):
                 if not isinstance(item, str) or not item.strip():
                     raise QuestionGenerationException(
                         f"Question {idx}, item {item_idx} is invalid or empty"
                     )
 
-            if not q_data['answer'].strip():
+            for opt_idx, option in enumerate(q_data['options']):
+                if not isinstance(option, str) or not option.strip():
+                    raise QuestionGenerationException(
+                        f"Question {idx}, option {opt_idx} is invalid or empty"
+                    )
+
+            # Validate correct answer
+            if not q_data['correct_answer'].strip():
                 raise QuestionGenerationException(f"Question {idx} has empty answer")
 
-            # Validate answer length
-            if len(q_data['answer']) > 500:
+            # Verify correct answer is in options
+            if q_data['correct_answer'] not in q_data['options']:
                 raise QuestionGenerationException(
-                    f"Question {idx} answer exceeds 500 characters"
+                    f"Question {idx}: correct_answer must be one of the options"
                 )
 
     def _create_questions_from_data(self, game: Game, questions_data: List[Dict[str, Any]]) -> List[Question]:
@@ -201,9 +230,9 @@ Return ONLY the JSON array, nothing else."""
             question = Question.objects.create(
                 game=game,
                 order=idx,
-                text="What connects these four items?",
                 items=q_data.get('items', []),
-                correct_answer=q_data.get('answer', '').strip(),
+                options=q_data.get('options', []),
+                correct_answer=q_data.get('correct_answer', '').strip(),
                 hint=q_data.get('hint', '').strip(),
                 time_limit=time_limit
             )
@@ -215,104 +244,124 @@ Return ONLY the JSON array, nothing else."""
         """Create sample questions as fallback."""
         sample_questions = [
             {
+                "items": ["Newton", "Steve Jobs", "New York", "Granny Smith"],
+                "options": ["Apple", "Microsoft", "Orange", "Banana"],
+                "correct_answer": "Apple",
+                "hint": "A company, a fruit, and a physicist's discovery"
+            },
+            {
+                "items": ["Superman", "Batman", "Wonder Woman", "The Flash"],
+                "options": ["DC Comics", "Marvel", "Avengers", "X-Men"],
+                "correct_answer": "DC Comics",
+                "hint": "Publisher of superhero comics with dark, serious films"
+            },
+            {
+                "items": ["Paris", "Eiffel", "Croissant", "Louvre"],
+                "options": ["France", "Italy", "Spain", "Germany"],
+                "correct_answer": "France",
+                "hint": "European country famous for cuisine and romance"
+            },
+            {
+                "items": ["Swoosh", "Just Do It", "Air Jordan", "Oregon"],
+                "options": ["Nike", "Adidas", "Puma", "Reebok"],
+                "correct_answer": "Nike",
+                "hint": "Sports brand founded by athletes in the 1960s"
+            },
+            {
+                "items": ["King", "Crown", "Palace", "Throne"],
+                "options": ["Royalty", "Chess", "Cards", "Democracy"],
+                "correct_answer": "Royalty",
+                "hint": "Related to monarchs and their rule"
+            },
+            {
+                "items": ["Simba", "Nala", "Pride Rock", "Hakuna Matata"],
+                "options": ["The Lion King", "Jungle Book", "Madagascar", "Tarzan"],
+                "correct_answer": "The Lion King",
+                "hint": "Disney movie about a young lion prince"
+            },
+            {
+                "items": ["Gryffindor", "Hogwarts", "Quidditch", "Muggles"],
+                "options": ["Harry Potter", "Lord of the Rings", "Narnia", "Percy Jackson"],
+                "correct_answer": "Harry Potter",
+                "hint": "Wizarding world created by J.K. Rowling"
+            },
+            {
+                "items": ["Pikachu", "Charizard", "Ash", "Pokéballs"],
+                "options": ["Pokémon", "Digimon", "Yu-Gi-Oh", "Dragon Ball"],
+                "correct_answer": "Pokémon",
+                "hint": "Gotta catch 'em all!"
+            },
+            {
+                "items": ["Messi", "Barcelona", "Argentina", "World Cup 2022"],
+                "options": ["Football/Soccer", "Basketball", "Cricket", "Tennis"],
+                "correct_answer": "Football/Soccer",
+                "hint": "The beautiful game played with feet"
+            },
+            {
+                "items": ["Statue of Liberty", "Times Square", "Central Park", "Broadway"],
+                "options": ["New York", "Los Angeles", "Chicago", "Boston"],
+                "correct_answer": "New York",
+                "hint": "The Big Apple, the city that never sleeps"
+            },
+            {
+                "items": ["Pizza", "Pasta", "Colosseum", "Venice"],
+                "options": ["Italy", "Greece", "France", "Spain"],
+                "correct_answer": "Italy",
+                "hint": "Boot-shaped European country famous for food"
+            },
+            {
+                "items": ["Sushi", "Tokyo", "Mt. Fuji", "Samurai"],
+                "options": ["Japan", "China", "Korea", "Thailand"],
+                "correct_answer": "Japan",
+                "hint": "Island nation known for technology and tradition"
+            },
+            {
+                "items": ["Pyramids", "Sphinx", "Nile", "Pharaohs"],
+                "options": ["Egypt", "Iraq", "Morocco", "Libya"],
+                "correct_answer": "Egypt",
+                "hint": "Ancient civilization with iconic monuments"
+            },
+            {
+                "items": ["Kangaroo", "Sydney", "Outback", "Great Barrier Reef"],
+                "options": ["Australia", "New Zealand", "Indonesia", "Papua New Guinea"],
+                "correct_answer": "Australia",
+                "hint": "Island continent down under"
+            },
+            {
+                "items": ["Tea", "Big Ben", "Queen", "London"],
+                "options": ["England", "France", "Scotland", "Ireland"],
+                "correct_answer": "England",
+                "hint": "Part of the United Kingdom with royal history"
+            },
+            {
+                "items": ["C++", "Java", "Python", "JavaScript"],
+                "options": ["Programming Languages", "Coffee Types", "Snake Species", "Islands"],
+                "correct_answer": "Programming Languages",
+                "hint": "Used by software developers to write code"
+            },
+            {
+                "items": ["iPhone", "Mac", "iPad", "AirPods"],
+                "options": ["Apple Products", "Samsung Products", "Tech Accessories", "Phone Brands"],
+                "correct_answer": "Apple Products",
+                "hint": "Devices from a company with a bitten fruit logo"
+            },
+            {
+                "items": ["Spotify", "YouTube Music", "Apple Music", "Deezer"],
+                "options": ["Music Streaming", "Video Platforms", "Social Media", "Podcast Apps"],
+                "correct_answer": "Music Streaming",
+                "hint": "Services for listening to songs online"
+            },
+            {
                 "items": ["Mercury", "Venus", "Earth", "Mars"],
-                "answer": "Inner planets of the solar system",
-                "hint": "They're all closer to the Sun than the asteroid belt"
-            },
-            {
-                "items": ["Paris", "Rome", "London", "Berlin"],
-                "answer": "European capital cities",
-                "hint": "Each is the capital of a major European country"
-            },
-            {
-                "items": ["Leonardo da Vinci", "Michelangelo", "Raphael", "Donatello"],
-                "answer": "Renaissance artists and Ninja Turtles",
-                "hint": "Famous artists from the Renaissance period"
-            },
-            {
-                "items": ["Red", "Orange", "Yellow", "Green"],
-                "answer": "Colors in the rainbow",
-                "hint": "They appear in a specific light spectrum"
-            },
-            {
-                "items": ["Spring", "Summer", "Autumn", "Winter"],
-                "answer": "The four seasons",
-                "hint": "They repeat every year"
+                "options": ["Inner Planets", "Outer Planets", "Gas Giants", "Dwarf Planets"],
+                "correct_answer": "Inner Planets",
+                "hint": "Rocky planets closest to the Sun"
             },
             {
                 "items": ["Heart", "Diamond", "Club", "Spade"],
-                "answer": "Suits in a deck of cards",
-                "hint": "Found on playing cards"
-            },
-            {
-                "items": ["Apple", "Microsoft", "Google", "Amazon"],
-                "answer": "Major tech companies",
-                "hint": "They're all trillion-dollar companies"
-            },
-            {
-                "items": ["Lion", "Tiger", "Leopard", "Jaguar"],
-                "answer": "Big cats",
-                "hint": "All are large felines"
-            },
-            {
-                "items": ["Guitar", "Piano", "Violin", "Drums"],
-                "answer": "Musical instruments",
-                "hint": "Used to create music"
-            },
-            {
-                "items": ["Gold", "Silver", "Bronze", "Copper"],
-                "answer": "Metallic elements",
-                "hint": "All are types of metal"
-            },
-            {
-                "items": ["Pacific", "Atlantic", "Indian", "Arctic"],
-                "answer": "Earth's oceans",
-                "hint": "Large bodies of saltwater"
-            },
-            {
-                "items": ["Shakespeare", "Dickens", "Austen", "Orwell"],
-                "answer": "Famous British authors",
-                "hint": "All wrote classic English literature"
-            },
-            {
-                "items": ["Nile", "Amazon", "Yangtze", "Mississippi"],
-                "answer": "Major rivers of the world",
-                "hint": "Long flowing bodies of water"
-            },
-            {
-                "items": ["Jupiter", "Saturn", "Uranus", "Neptune"],
-                "answer": "Gas giant planets",
-                "hint": "Outer planets of the solar system"
-            },
-            {
-                "items": ["Football", "Basketball", "Tennis", "Cricket"],
-                "answer": "Popular sports",
-                "hint": "Games played with balls"
-            },
-            {
-                "items": ["Hydrogen", "Helium", "Oxygen", "Nitrogen"],
-                "answer": "Chemical elements",
-                "hint": "Found on the periodic table"
-            },
-            {
-                "items": ["Washington DC", "Ottawa", "Mexico City", "Havana"],
-                "answer": "North American capital cities",
-                "hint": "Capitals of countries in North America"
-            },
-            {
-                "items": ["Toyota", "Honda", "Ford", "BMW"],
-                "answer": "Car manufacturers",
-                "hint": "Companies that make automobiles"
-            },
-            {
-                "items": ["Mandarin", "Spanish", "English", "Hindi"],
-                "answer": "Most spoken languages",
-                "hint": "Languages spoken by millions"
-            },
-            {
-                "items": ["Python", "Java", "JavaScript", "C++"],
-                "answer": "Programming languages",
-                "hint": "Used for software development"
+                "options": ["Card Suits", "Jewelry", "Garden Tools", "Symbols"],
+                "correct_answer": "Card Suits",
+                "hint": "Found on a standard deck of playing cards"
             }
         ]
 
@@ -325,9 +374,9 @@ Return ONLY the JSON array, nothing else."""
             question = Question.objects.create(
                 game=game,
                 order=idx,
-                text="What connects these four items?",
                 items=q_data['items'],
-                correct_answer=q_data['answer'],
+                options=q_data['options'],
+                correct_answer=q_data['correct_answer'],
                 hint=q_data.get('hint', ''),
                 time_limit=time_limit
             )

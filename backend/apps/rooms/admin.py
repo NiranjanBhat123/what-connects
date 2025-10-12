@@ -18,7 +18,9 @@ class RoomPlayerInline(admin.TabularInline):
 
     def joined_at(self, obj):
         """Show when player joined."""
-        return obj.created_at.strftime('%Y-%m-%d %H:%M')
+        if obj.created_at:
+            return obj.created_at.strftime('%Y-%m-%d %H:%M')
+        return '-'
     joined_at.short_description = 'Joined At'
 
 
@@ -69,7 +71,7 @@ class RoomAdmin(TimeStampedAdmin):
     def status_display(self, obj):
         """Display status with color coding."""
         status_config = {
-            'waiting': ('🕐', 'orange', 'Waiting'),
+            'waiting': ('🕒', 'orange', 'Waiting'),
             'in_progress': ('🎮', 'blue', 'In Progress'),
             'completed': ('✅', 'gray', 'Completed'),
         }
@@ -122,7 +124,7 @@ class RoomAdmin(TimeStampedAdmin):
         games_played = obj.games.count()
         total_answers = 0
 
-        if obj.current_game:
+        if obj.games.exists():
             from ..games.models import Answer
             total_answers = Answer.objects.filter(
                 question__game__room=obj
