@@ -1,6 +1,6 @@
 """
 Room views.
-FIXED VERSION with proper error handling and cleanup.
+FIXED VERSION with WebSocket game start broadcasting.
 """
 import logging
 from rest_framework import generics, status
@@ -10,6 +10,8 @@ from rest_framework.permissions import AllowAny
 from django.shortcuts import get_object_or_404
 from django.db import transaction, IntegrityError
 from django.conf import settings
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 
 from .models import Room, RoomPlayer
 from .serializers import (
@@ -51,11 +53,10 @@ class RoomCreateView(generics.CreateAPIView):
                 host=host
             )
 
-            # Add host as first player (active by default)
+            # Add host as first player
             RoomPlayer.objects.create(
                 room=room,
-                player=host,
-                is_active=True
+                player=host
             )
 
             logger.info(f"Room {room.code} created by {host.username}")
@@ -107,7 +108,7 @@ class RoomJoinView(APIView):
         if room.status != 'waiting':
             raise GameAlreadyStartedException()
 
-        # Check if room is full (count only active players)
+        # Check if room is full
         if room.is_full:
             raise RoomFullException()
 
@@ -115,16 +116,11 @@ class RoomJoinView(APIView):
         room_player, created = RoomPlayer.objects.get_or_create(
             room=room,
             player=player,
-            defaults={'is_ready': False, 'score': 0, 'is_active': True}
+            defaults={'is_ready': False, 'score': 0}
         )
 
         if not created:
-            # Reactivate if player was inactive
-            if not room_player.is_active:
-                room_player.activate()
-                logger.info(f"Player {player.username} rejoined room {room.code}")
-            else:
-                logger.info(f"Player {player.username} already in room {room.code}")
+            logger.info(f"Player {player.username} already in room {room.code}")
         else:
             logger.info(f"Player {player.username} joined room {room.code}")
 
@@ -161,14 +157,8 @@ class RoomLeaveView(APIView):
         # Remove player from room
         try:
             room_player = RoomPlayer.objects.get(room=room, player=player)
-
-            # If game is in progress, just deactivate instead of deleting
-            if room.status == 'active':
-                room_player.deactivate()
-                logger.info(f"Player {player.username} left active game in room {room.code}")
-            else:
-                room_player.delete()
-                logger.info(f"Player {player.username} left room {room.code}")
+            room_player.delete()
+            logger.info(f"Player {player.username} left room {room.code}")
 
         except RoomPlayer.DoesNotExist:
             return Response(
@@ -178,7 +168,7 @@ class RoomLeaveView(APIView):
 
         # If host left and room has other players, assign new host
         if room.host == player:
-            remaining_players = room.players.filter(is_active=True)
+            remaining_players = room.players.all()
             if remaining_players.exists():
                 new_host_player = remaining_players.first().player
                 room.host = new_host_player
@@ -187,7 +177,7 @@ class RoomLeaveView(APIView):
             else:
                 # Clean up associated games before deleting room
                 self._cleanup_room_games(room)
-                logger.info(f"Room {room.code} deleted (no active players remaining)")
+                logger.info(f"Room {room.code} deleted (no players remaining)")
                 room.delete()
                 return Response({'message': 'Room deleted'}, status=status.HTTP_200_OK)
 
@@ -239,7 +229,7 @@ class RoomStartGameView(APIView):
             )
 
         # Check if game already in progress
-        if room.status == 'active':
+        if room.status == 'in_progress':
             raise GameAlreadyStartedException()
 
         logger.info(f"Starting game in room {room.code}")
@@ -256,8 +246,8 @@ class RoomStartGameView(APIView):
                 current_question_index=0
             )
 
-            # Create game scores for all active players in room
-            for room_player in room.players.filter(is_active=True):
+            # Create game scores for all players in room
+            for room_player in room.players.all():
                 GameScore.objects.create(
                     game=game,
                     player=room_player.player,
@@ -269,30 +259,64 @@ class RoomStartGameView(APIView):
             # Generate questions - if this fails, rollback everything
             num_questions = getattr(settings, 'QUESTIONS_PER_GAME', 10)
             game_service = GameService()
-            questions_created = game_service.start_game(game, num_questions)
+            game_service.start_game(game, num_questions)
 
-            if questions_created == 0:
+            # Refresh game to get questions
+            game.refresh_from_db()
+
+            if game.total_questions == 0:
                 raise QuestionGenerationException(
                     detail='Failed to generate questions for the game'
                 )
 
             # Update room status only after successful question generation
-            room.status = 'active'
+            room.status = 'in_progress'
+            room.current_game = game
             room.save()
 
-            logger.info(f"Generated {questions_created} questions for game {game.id}")
+            logger.info(f"Generated {game.total_questions} questions for game {game.id}")
+
+            # Get first question for broadcasting
+            first_question = game.current_question
+
+            # Broadcast game start via WebSocket - CRITICAL
+            channel_layer = get_channel_layer()
+            if channel_layer and first_question:
+                from asgiref.sync import async_to_sync
+
+                game_started_data = {
+                    'type': 'game_started',
+                    'question': {
+                        'id': str(first_question.id),
+                        'order': first_question.order,
+                        'text': first_question.text,
+                        'items': first_question.items,
+                        'hint': first_question.hint if first_question.hint else '',
+                        'time_limit': first_question.time_limit if first_question.time_limit else 30
+                    },
+                    'question_number': 1,
+                    'total_questions': game.total_questions,
+                    'timestamp': game.created_at.isoformat() + 'Z'
+                }
+
+                logger.info(f"Broadcasting game_started event for room {room.code}: {game_started_data}")
+
+                async_to_sync(channel_layer.group_send)(
+                    f'game_room_{room.code}',
+                    game_started_data
+                )
+                logger.info(f"Successfully broadcasted game_started event for room {room.code}")
 
             response_serializer = RoomSerializer(room)
             return Response(response_serializer.data)
 
         except QuestionGenerationException as e:
-            # Explicit rollback - transaction.atomic will handle it
             logger.error(f"Question generation failed for room {room.code}: {str(e)}")
             raise
         except Exception as e:
             logger.error(f"Error starting game in room {room.code}: {str(e)}", exc_info=True)
             return Response(
-                {'error': 'Failed to start game. Please try again.'},
+                {'error': {'code': 'game_start_failed', 'message': 'Failed to start game. Please try again.'}},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 

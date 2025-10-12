@@ -195,6 +195,7 @@ SPECTACULAR_SETTINGS = {
 
 # Google Gemini AI
 GEMINI_API_KEY = env('GEMINI_API_KEY', default='')
+GEMINI_MODEL = env('GEMINI_MODEL', default='gemini-2.5-pro')
 
 # Game Settings
 GAME_SETTINGS = {

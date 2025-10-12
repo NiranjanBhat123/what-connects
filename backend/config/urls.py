@@ -21,9 +21,9 @@ urlpatterns = [
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
 
     # API endpoints
-    path('api/v1/users/', include('apps.users.urls')),
-    path('api/v1/rooms/', include('apps.rooms.urls')),
-    path('api/v1/games/', include('apps.games.urls')),
+    path('api/users/', include('apps.users.urls')),
+    path('api/rooms/', include('apps.rooms.urls')),
+    path('api/games/', include('apps.games.urls')),
 
     # Health check
     path('health/', include('apps.core.urls')),
@@ -37,4 +37,5 @@ if settings.DEBUG:
     # Django Debug Toolbar
     if 'debug_toolbar' in settings.INSTALLED_APPS:
         import debug_toolbar
+
         urlpatterns = [path('__debug__/', include(debug_toolbar.urls))] + urlpatterns
