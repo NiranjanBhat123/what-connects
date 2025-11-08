@@ -53,8 +53,8 @@ class QuestionInline(admin.TabularInline):
                 percentage = (correct / total) * 100
                 color = 'green' if percentage >= 50 else 'orange' if percentage >= 25 else 'red'
                 return format_html(
-                    '<span style="color: {}; font-weight: bold;">{:.1f}%</span>',
-                    color, percentage
+                    '<span style="color: {}; font-weight: bold;">{}%</span>',
+                    color, f'{percentage:.1f}'
                 )
         return '-'
     correct_rate.short_description = 'Correct %'
@@ -77,8 +77,8 @@ class GameScoreInline(admin.TabularInline):
         else:
             color = 'red'
         return format_html(
-            '<span style="color: {}; font-weight: bold;">{:.1f}%</span>',
-            color, accuracy
+            '<span style="color: {}; font-weight: bold;">{}%</span>',
+            color, f'{accuracy:.1f}'
         )
     accuracy_display.short_description = 'Accuracy'
 
@@ -191,16 +191,17 @@ class GameAdmin(TimeStampedAdmin):
         )
 
         total_answers = Answer.objects.filter(question__game=obj).count()
+        avg_score = stats['avg_score'] or 0
 
         return format_html(
             '<div style="background: #f8f9fa; padding: 15px; border-radius: 5px;">'
             '<p><strong>Players:</strong> {}</p>'
-            '<p><strong>Avg Score:</strong> {:.1f} points</p>'
+            '<p><strong>Avg Score:</strong> {} points</p>'
             '<p><strong>Total Answers:</strong> {}</p>'
             '<p><strong>Questions:</strong> {}</p>'
             '</div>',
             stats['total_players'] or 0,
-            stats['avg_score'] or 0,
+            f'{avg_score:.1f}',
             total_answers,
             obj.total_questions
         )
@@ -287,8 +288,8 @@ class QuestionAdmin(TimeStampedAdmin):
             percentage = (correct / total) * 100
             color = 'green' if percentage >= 50 else 'orange' if percentage >= 25 else 'red'
             return format_html(
-                '<span style="color: {};">{}/{}</span> <small>({:.0f}%)</small>',
-                color, correct, total, percentage
+                '<span style="color: {};">{}/{}</span> <small>({}%)</small>',
+                color, correct, total, f'{percentage:.0f}'
             )
         return '-'
     answer_stats.short_description = 'Answers (Correct/Total)'
@@ -308,17 +309,20 @@ class QuestionAdmin(TimeStampedAdmin):
         with_hint = answers.filter(used_hint=True).count()
         avg_time = answers.aggregate(Avg('time_taken'))['time_taken__avg'] or 0
 
+        correct_pct = (correct/total)*100
+        hint_pct = (with_hint/total)*100 if total > 0 else 0
+
         return format_html(
             '<div style="background: #f8f9fa; padding: 15px; border-radius: 5px;">'
             '<p><strong>Total Answers:</strong> {}</p>'
-            '<p><strong>Correct:</strong> {} ({:.1f}%)</p>'
-            '<p><strong>Used Hint:</strong> {} ({:.1f}%)</p>'
-            '<p><strong>Avg Time:</strong> {:.1f}s</p>'
+            '<p><strong>Correct:</strong> {} ({}%)</p>'
+            '<p><strong>Used Hint:</strong> {} ({}%)</p>'
+            '<p><strong>Avg Time:</strong> {}s</p>'
             '</div>',
             total,
-            correct, (correct/total)*100,
-            with_hint, (with_hint/total)*100 if total > 0 else 0,
-            avg_time
+            correct, f'{correct_pct:.1f}',
+            with_hint, f'{hint_pct:.1f}',
+            f'{avg_time:.1f}'
         )
     answer_statistics.short_description = 'Answer Statistics'
 
@@ -501,9 +505,9 @@ class GameScoreAdmin(TimeStampedAdmin):
         return format_html(
             '<div style="width: 100px; background: #f0f0f0; border-radius: 3px;">'
             '<div style="width: {}%; background: {}; height: 20px; border-radius: 3px; text-align: center; color: white; font-size: 11px; line-height: 20px;">'
-            '{:.0f}%'
+            '{}%'
             '</div></div>',
-            accuracy, color, accuracy
+            accuracy, color, f'{accuracy:.0f}'
         )
     accuracy_display.short_description = 'Accuracy'
 
@@ -512,6 +516,7 @@ class GameScoreAdmin(TimeStampedAdmin):
         if not obj.id:
             return '-'
 
+        accuracy = obj.accuracy
         return format_html(
             '<div style="background: #f8f9fa; padding: 15px; border-radius: 5px;">'
             '<h3 style="margin-top: 0;">Score Breakdown</h3>'
@@ -521,7 +526,7 @@ class GameScoreAdmin(TimeStampedAdmin):
             '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Correct Answers</td><td style="padding: 8px; text-align: right; color: green;">{}</td></tr>'
             '<tr><td style="padding: 8px;">Wrong Answers</td><td style="padding: 8px; text-align: right; color: red;">{}</td></tr>'
             '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Hints Used</td><td style="padding: 8px; text-align: right;">💡 {}</td></tr>'
-            '<tr><td style="padding: 8px;">Accuracy</td><td style="padding: 8px; text-align: right; font-weight: bold;">{:.1f}%</td></tr>'
+            '<tr><td style="padding: 8px;">Accuracy</td><td style="padding: 8px; text-align: right; font-weight: bold;">{}%</td></tr>'
             '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Rank</td><td style="padding: 8px; text-align: right; font-weight: bold;">#{}</td></tr>'
             '</table>'
             '</div>',
@@ -529,7 +534,7 @@ class GameScoreAdmin(TimeStampedAdmin):
             obj.correct_answers,
             obj.wrong_answers,
             obj.hints_used,
-            obj.accuracy,
+            f'{accuracy:.1f}',
             obj.rank or '-'
         )
     score_breakdown.short_description = 'Breakdown'

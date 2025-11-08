@@ -25,6 +25,7 @@ export default function GamePlayPage() {
     const [isLoadingQuestion, setIsLoadingQuestion] = useState(true);
     const [leaderboard, setLeaderboard] = useState([]);
     const [showLeaderboard, setShowLeaderboard] = useState(false);
+    const [showLeaderboardPopup, setShowLeaderboardPopup] = useState(false);
     const [isHost, setIsHost] = useState(false);
 
     const timerRef = useRef(null);
@@ -68,6 +69,7 @@ export default function GamePlayPage() {
 
         websocketManager.on('game_started', (data) => {
             console.log('Game started event:', data);
+            console.log('Question hint:', data.question?.hint);
             if (data.question) {
                 setCurrentQuestion(data.question);
                 setCurrentQuestionIndex(0);
@@ -79,6 +81,7 @@ export default function GamePlayPage() {
 
         websocketManager.on('next_question', (data) => {
             console.log('Next question:', data);
+            console.log('Next question hint:', data.question?.hint);
             if (data.question) {
                 setCurrentQuestion(data.question);
                 setCurrentQuestionIndex(data.question_number - 1);
@@ -88,7 +91,12 @@ export default function GamePlayPage() {
                 setAnswerResult(null);
                 setShowHint(false);
                 setUsedHint(false);
-                setShowLeaderboard(false);
+                setShowLeaderboardPopup(false);
+                
+                // Clear any existing timer
+                if (timerRef.current) {
+                    clearInterval(timerRef.current);
+                }
             }
         });
 
@@ -114,6 +122,11 @@ export default function GamePlayPage() {
                     message: isCorrect ? 'Correct!' : 'Incorrect'
                 });
                 setIsSubmitting(false);
+                
+                // Stop the timer when answer is submitted
+                if (timerRef.current) {
+                    clearInterval(timerRef.current);
+                }
             }
 
             // Don't update leaderboard immediately - wait for timer or all_players_answered
@@ -160,6 +173,12 @@ export default function GamePlayPage() {
             if (data.leaderboard) {
                 setLeaderboard(data.leaderboard);
                 setShowLeaderboard(true);
+                setShowLeaderboardPopup(true);
+                
+                // Auto-hide popup after 5 seconds
+                setTimeout(() => {
+                    setShowLeaderboardPopup(false);
+                }, 5000);
             }
         });
     };
@@ -295,7 +314,10 @@ export default function GamePlayPage() {
 
     return (
         <div className="min-h-screen py-6 px-4 bg-gradient-to-br from-purple-50 to-pink-50">
-            <div className="max-w-4xl mx-auto space-y-4">
+            <div className="max-w-7xl mx-auto">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    {/* Main Game Area */}
+                    <div className="lg:col-span-2 space-y-4">
                 {/* Progress Bar */}
                 <motion.div
                     initial={{ opacity: 0, y: -20 }}
@@ -334,13 +356,18 @@ export default function GamePlayPage() {
                                 {timeRemaining}s
                             </span>
                         </div>
-                        {!hasAnswered && !usedHint && currentQuestion.hint && (
+                        {!hasAnswered && currentQuestion.hint && currentQuestion.hint.trim() !== '' && (
                             <button
                                 onClick={handleRequestHint}
-                                className="flex items-center gap-2 px-4 py-2 bg-yellow-100 hover:bg-yellow-200 text-yellow-800 rounded-lg transition-colors font-medium"
+                                disabled={usedHint}
+                                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors font-medium ${
+                                    usedHint 
+                                        ? 'bg-gray-200 text-gray-500 cursor-not-allowed' 
+                                        : 'bg-yellow-100 hover:bg-yellow-200 text-yellow-800'
+                                }`}
                             >
                                 <Lightbulb className="w-4 h-4" />
-                                Get Hint
+                                {usedHint ? 'Hint Used' : 'Show Hint'}
                             </button>
                         )}
                     </div>
@@ -569,45 +596,128 @@ export default function GamePlayPage() {
                         </motion.div>
                     )}
                 </motion.div>
+                    </div>
 
-                {/* Leaderboard */}
-                {showLeaderboard && leaderboard.length > 0 && (
-                    <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="bg-white rounded-xl p-6 shadow-lg"
-                    >
-                        <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
-                            <Trophy className="w-6 h-6 text-purple-600" />
-                            Current Standings
-                        </h3>
-                        <div className="space-y-2">
-                            {leaderboard.slice(0, 5).map((playerScore, idx) => (
-                                <div
-                                    key={idx}
-                                    className={`flex items-center justify-between p-3 rounded-lg ${
-                                        playerScore.player_id === player?.id
-                                            ? 'bg-purple-100 border-2 border-purple-500'
-                                            : 'bg-gray-50'
-                                    }`}
-                                >
-                                    <div className="flex items-center gap-3">
-                                        <span className="text-xl font-bold text-gray-400">
-                                            #{idx + 1}
-                                        </span>
-                                        <span className="font-medium">
-                                            {playerScore.player_name}
-                                        </span>
+                    {/* Sidebar - Leaderboard */}
+                    <div className="lg:col-span-1">
+                        <div className="sticky top-6">
+                            <motion.div
+                                initial={{ opacity: 0, x: 20 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                className="bg-white rounded-xl p-6 shadow-lg"
+                            >
+                                <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+                                    <Trophy className="w-6 h-6 text-purple-600" />
+                                    Leaderboard
+                                </h3>
+                                {leaderboard.length > 0 ? (
+                                    <div className="space-y-2">
+                                        {leaderboard.map((playerScore, idx) => (
+                                            <div
+                                                key={idx}
+                                                className={`flex items-center justify-between p-3 rounded-lg transition-all ${
+                                                    playerScore.player_id === player?.id
+                                                        ? 'bg-purple-100 border-2 border-purple-500'
+                                                        : 'bg-gray-50'
+                                                }`}
+                                            >
+                                                <div className="flex items-center gap-3">
+                                                    <span className={`text-lg font-bold ${
+                                                        idx === 0 ? 'text-yellow-500' :
+                                                        idx === 1 ? 'text-gray-400' :
+                                                        idx === 2 ? 'text-orange-600' :
+                                                        'text-gray-400'
+                                                    }`}>
+                                                        {idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`}
+                                                    </span>
+                                                    <span className="font-medium text-sm">
+                                                        {playerScore.player_name}
+                                                    </span>
+                                                </div>
+                                                <div className="bg-purple-600 text-white px-2 py-1 rounded-full font-bold text-sm">
+                                                    {playerScore.total_score}
+                                                </div>
+                                            </div>
+                                        ))}
                                     </div>
-                                    <div className="bg-purple-600 text-white px-3 py-1 rounded-full font-bold">
-                                        {playerScore.total_score} pts
-                                    </div>
-                                </div>
-                            ))}
+                                ) : (
+                                    <p className="text-gray-500 text-center py-4">
+                                        No scores yet
+                                    </p>
+                                )}
+                            </motion.div>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Leaderboard Popup - Shows after each question */}
+            <AnimatePresence>
+                {showLeaderboardPopup && leaderboard.length > 0 && (
+                    <motion.div
+                        initial={{ opacity: 0, scale: 0.9, y: 50 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.9, y: 50 }}
+                        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-50"
+                        onClick={() => setShowLeaderboardPopup(false)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.9 }}
+                            animate={{ scale: 1 }}
+                            className="bg-white rounded-2xl p-8 shadow-2xl max-w-md w-full"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <div className="text-center mb-6">
+                                <Trophy className="w-16 h-16 text-yellow-500 mx-auto mb-3" />
+                                <h2 className="text-3xl font-bold text-gray-800">Current Standings</h2>
+                            </div>
+                            <div className="space-y-3">
+                                {leaderboard.slice(0, 5).map((playerScore, idx) => (
+                                    <motion.div
+                                        key={idx}
+                                        initial={{ opacity: 0, x: -20 }}
+                                        animate={{ opacity: 1, x: 0 }}
+                                        transition={{ delay: idx * 0.1 }}
+                                        className={`flex items-center justify-between p-4 rounded-xl ${
+                                            playerScore.player_id === player?.id
+                                                ? 'bg-gradient-to-r from-purple-100 to-pink-100 border-2 border-purple-500'
+                                                : 'bg-gray-50'
+                                        }`}
+                                    >
+                                        <div className="flex items-center gap-4">
+                                            <span className={`text-2xl font-bold ${
+                                                idx === 0 ? 'text-yellow-500' :
+                                                idx === 1 ? 'text-gray-400' :
+                                                idx === 2 ? 'text-orange-600' :
+                                                'text-gray-400'
+                                            }`}>
+                                                {idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`}
+                                            </span>
+                                            <div>
+                                                <p className="font-bold text-lg">{playerScore.player_name}</p>
+                                                {playerScore.correct_answers !== undefined && (
+                                                    <p className="text-xs text-gray-500">
+                                                        {playerScore.correct_answers} correct
+                                                    </p>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div className="bg-gradient-to-r from-purple-600 to-pink-600 text-white px-4 py-2 rounded-full font-bold text-lg">
+                                            {playerScore.total_score}
+                                        </div>
+                                    </motion.div>
+                                ))}
+                            </div>
+                            <button
+                                onClick={() => setShowLeaderboardPopup(false)}
+                                className="mt-6 w-full py-3 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-lg font-bold hover:shadow-lg transition-all"
+                            >
+                                Continue
+                            </button>
+                        </motion.div>
                     </motion.div>
                 )}
-            </div>
+            </AnimatePresence>
         </div>
     );
 }

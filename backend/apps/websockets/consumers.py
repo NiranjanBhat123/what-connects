@@ -210,6 +210,46 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         all_answered = await self.check_all_players_answered(question_id)
         if all_answered:
             await self.broadcast_leaderboard_update()
+            
+            # Auto-advance to next question after a short delay
+            import asyncio
+            await asyncio.sleep(3)  # Give players time to see the leaderboard
+            
+            # Get next question
+            question_data = await self.get_next_question()
+            
+            if question_data.get('error'):
+                logger.error(f"Error getting next question: {question_data.get('error')}")
+                return
+            
+            # Check if game is complete
+            if question_data.get('game_complete'):
+                results = await self.get_final_results()
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        'type': 'game_complete',
+                        'results': results,
+                        'timestamp': self._get_timestamp()
+                    }
+                )
+            else:
+                # Broadcast next question to all players
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        'type': 'next_question',
+                        'question': question_data['question'],
+                        'question_number': question_data['question_number'],
+                        'total_questions': question_data['total_questions'],
+                        'timestamp': self._get_timestamp()
+                    }
+                )
+                
+                # Start timer for automatic leaderboard update
+                question_id = question_data['question']['id']
+                time_limit = question_data['question'].get('time_limit', 30)
+                await self.start_question_timer(question_id, time_limit)
 
     async def handle_start_game(self, data):
         """Handle game start request (host only)."""
@@ -611,6 +651,10 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
     def start_game(self):
         """Start the game."""
         try:
+            from django.conf import settings
+            from ..games.services import GameService
+            from ..games.models import GameScore
+            
             with transaction.atomic():
                 room = Room.objects.select_for_update().get(code=self.room_code)
 
@@ -622,6 +666,24 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                     status='active',
                     current_question_index=0
                 )
+                
+                # Create game scores for all players
+                for room_player in room.players.all():
+                    GameScore.objects.create(
+                        game=game,
+                        player=room_player.player,
+                        total_score=0,
+                        correct_answers=0,
+                        wrong_answers=0
+                    )
+                
+                # Generate questions immediately
+                num_questions = getattr(settings, 'QUESTIONS_PER_GAME', 10)
+                game_service = GameService()
+                game_service.start_game(game, num_questions)
+                
+                # Refresh to get generated questions
+                game.refresh_from_db()
 
                 first_question = game.current_question
                 if not first_question:
