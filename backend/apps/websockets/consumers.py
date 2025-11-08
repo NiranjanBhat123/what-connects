@@ -1,6 +1,8 @@
 """
-WebSocket consumers for real-time game functionality.
-FIXED VERSION with proper leaderboard timing and hint display.
+WebSocket consumers - FIXED VERSION with Delayed Answer Reveal
+✅ Answer locked immediately, result shown only after timer expires
+✅ All players see results together
+✅ Auto-advance working properly
 """
 import json
 import logging
@@ -17,15 +19,12 @@ from .utils import connection_manager
 
 logger = logging.getLogger(__name__)
 
-# Simple in-memory timer tracking
+# Timer tracking
 question_timers = {}
 
 
 class GameRoomConsumer(AsyncWebsocketConsumer):
-    """
-    WebSocket consumer for game room real-time communication.
-    Handles player connections, game state updates, and answer submissions.
-    """
+    """WebSocket consumer for game room real-time communication."""
 
     async def connect(self):
         """Handle WebSocket connection."""
@@ -65,7 +64,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         # Get player info
         player_info = await self.get_player_info()
 
-        # Broadcast to ALL players in room (including the one who just joined)
+        # Broadcast to ALL players in room
         await self.channel_layer.group_send(
             self.room_group_name,
             {
@@ -126,7 +125,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                 self.channel_name
             )
 
-            logger.info(f"Player {self.player_id} disconnected from room {self.room_code} (code: {close_code})")
+            logger.info(f"Player {self.player_id} disconnected from room {self.room_code}")
 
     async def receive(self, text_data):
         """Receive message from WebSocket."""
@@ -159,7 +158,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             await self.send_error("Error processing message")
 
     async def handle_submit_answer(self, data):
-        """Handle answer submission with race condition protection."""
+        """Handle answer submission - LOCK answer, don't reveal result yet."""
         answer = data.get('answer', '').strip()
         question_id = data.get('question_id')
         time_taken = data.get('time_taken', 0)
@@ -173,83 +172,40 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             await self.send_error("Question ID is required")
             return
 
-        # Check answer and update game state
+        # Save answer but DON'T reveal if correct
         result = await self.check_answer(answer, question_id, time_taken, used_hint)
 
         if result.get('error'):
             await self.send_error(result['error'])
             return
 
-        # Don't broadcast if already answered
+        # Already answered
         if result.get('already_answered'):
             await self.send(text_data=json.dumps({
-                'type': 'answer_result',
-                'is_correct': result['is_correct'],
+                'type': 'answer_locked',
                 'message': 'You already answered this question',
                 'timestamp': self._get_timestamp()
             }))
             return
 
-        # Broadcast answer submission to room (without leaderboard update)
+        # Broadcast that player submitted (NO correctness info)
         await self.channel_layer.group_send(
             self.room_group_name,
             {
                 'type': 'answer_submitted',
                 'player_id': str(self.player_id),
                 'player_name': result['player_name'],
-                'is_correct': result['is_correct'],
-                'correct_answer': result.get('correct_answer'),
                 'question_id': question_id,
-                'points_earned': result.get('points_earned', 0),
-                'total_score': result.get('total_score', 0),
                 'timestamp': self._get_timestamp()
             }
         )
 
-        # Check if all players have answered
-        all_answered = await self.check_all_players_answered(question_id)
-        if all_answered:
-            await self.broadcast_leaderboard_update()
-            
-            # Auto-advance to next question after a short delay
-            import asyncio
-            await asyncio.sleep(3)  # Give players time to see the leaderboard
-            
-            # Get next question
-            question_data = await self.get_next_question()
-            
-            if question_data.get('error'):
-                logger.error(f"Error getting next question: {question_data.get('error')}")
-                return
-            
-            # Check if game is complete
-            if question_data.get('game_complete'):
-                results = await self.get_final_results()
-                await self.channel_layer.group_send(
-                    self.room_group_name,
-                    {
-                        'type': 'game_complete',
-                        'results': results,
-                        'timestamp': self._get_timestamp()
-                    }
-                )
-            else:
-                # Broadcast next question to all players
-                await self.channel_layer.group_send(
-                    self.room_group_name,
-                    {
-                        'type': 'next_question',
-                        'question': question_data['question'],
-                        'question_number': question_data['question_number'],
-                        'total_questions': question_data['total_questions'],
-                        'timestamp': self._get_timestamp()
-                    }
-                )
-                
-                # Start timer for automatic leaderboard update
-                question_id = question_data['question']['id']
-                time_limit = question_data['question'].get('time_limit', 30)
-                await self.start_question_timer(question_id, time_limit)
+        # Send ONLY confirmation to this player (NO correctness)
+        await self.send(text_data=json.dumps({
+            'type': 'answer_locked',
+            'message': 'Answer locked! Waiting for timer...',
+            'timestamp': self._get_timestamp()
+        }))
 
     async def handle_start_game(self, data):
         """Handle game start request (host only)."""
@@ -276,52 +232,15 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             }
         )
 
-        # Start timer for first question
+        # Start timer for automatic reveal after time expires
         question_id = result['question']['id']
         time_limit = result['question'].get('time_limit', 30)
         await self.start_question_timer(question_id, time_limit)
 
     async def handle_next_question(self, data):
-        """Handle next question request (host only)."""
-        is_host = await self.verify_host()
-        if not is_host:
-            await self.send_error("Only the host can advance questions")
-            return
-
-        question_data = await self.get_next_question()
-
-        if question_data.get('error'):
-            await self.send_error(question_data['error'])
-            return
-
-        # Check if game is complete
-        if question_data.get('game_complete'):
-            results = await self.get_final_results()
-            await self.channel_layer.group_send(
-                self.room_group_name,
-                {
-                    'type': 'game_complete',
-                    'results': results,
-                    'timestamp': self._get_timestamp()
-                }
-            )
-        else:
-            # Broadcast next question to all players
-            await self.channel_layer.group_send(
-                self.room_group_name,
-                {
-                    'type': 'next_question',
-                    'question': question_data['question'],
-                    'question_number': question_data['question_number'],
-                    'total_questions': question_data['total_questions'],
-                    'timestamp': self._get_timestamp()
-                }
-            )
-
-            # Start timer for automatic leaderboard update
-            question_id = question_data['question']['id']
-            time_limit = question_data['question'].get('time_limit', 30)
-            await self.start_question_timer(question_id, time_limit)
+        """Handle next question request - DEPRECATED (game auto-advances now)."""
+        logger.warning("Manual next_question called - game should auto-advance")
+        await self.send_error("Game advances automatically after each question")
 
     async def handle_chat_message(self, data):
         """Handle chat messages."""
@@ -351,10 +270,12 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             await self.send_error("Question ID is required")
             return
 
+        logger.info(f"💡 Hint requested by player {self.player_id} for question {question_id}")
+
         hint = await self.get_hint(question_id)
 
-        if hint:
-            # Send hint only to requesting player
+        if hint and hint.strip():
+            logger.info(f"✅ Sending hint: {hint}")
             await self.send(text_data=json.dumps({
                 'type': 'hint',
                 'hint': hint,
@@ -362,6 +283,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                 'timestamp': self._get_timestamp()
             }))
         else:
+            logger.warning(f"❌ No hint available for question {question_id}")
             await self.send_error("No hint available")
 
     async def handle_ping(self, data):
@@ -371,8 +293,32 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             'timestamp': self._get_timestamp()
         }))
 
+    async def reveal_all_answers(self, question_id):
+        """Reveal all answers AFTER timer expires."""
+        logger.info(f"🔓 Revealing answers for question {question_id}")
+
+        # Get all answers for this question
+        answers_data = await self.get_question_answers(question_id)
+
+        # Broadcast reveal to all players
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                'type': 'answers_revealed',
+                'question_id': question_id,
+                'answers': answers_data,
+                'timestamp': self._get_timestamp()
+            }
+        )
+
     async def broadcast_leaderboard_update(self):
-        """Broadcast leaderboard update to all players."""
+        """Broadcast leaderboard update AFTER answers revealed."""
+        import asyncio
+
+        # Wait 2 seconds for answer reveal animation
+        await asyncio.sleep(2)
+
+        logger.info(f"📊 Broadcasting leaderboard update for room {self.room_code}")
         leaderboard = await self.get_current_leaderboard()
 
         await self.channel_layer.group_send(
@@ -384,8 +330,51 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             }
         )
 
+        # Auto-advance to next question after showing leaderboard
+        await asyncio.sleep(5)  # Wait 5 seconds for leaderboard display
+        await self.auto_advance_question()
+
+    async def auto_advance_question(self):
+        """Automatically advance to next question or end game."""
+        logger.info(f"➡️ Auto-advancing to next question for room {self.room_code}")
+
+        question_data = await self.get_next_question()
+
+        if question_data.get('error'):
+            logger.error(f"Error auto-advancing: {question_data['error']}")
+            return
+
+        # Check if game is complete
+        if question_data.get('game_complete'):
+            results = await self.get_final_results()
+            await self.channel_layer.group_send(
+                self.room_group_name,
+                {
+                    'type': 'game_complete',
+                    'results': results,
+                    'timestamp': self._get_timestamp()
+                }
+            )
+        else:
+            # Broadcast next question to all players
+            await self.channel_layer.group_send(
+                self.room_group_name,
+                {
+                    'type': 'next_question',
+                    'question': question_data['question'],
+                    'question_number': question_data['question_number'],
+                    'total_questions': question_data['total_questions'],
+                    'timestamp': self._get_timestamp()
+                }
+            )
+
+            # Start timer for next question
+            question_id = question_data['question']['id']
+            time_limit = question_data['question'].get('time_limit', 30)
+            await self.start_question_timer(question_id, time_limit)
+
     async def start_question_timer(self, question_id, duration):
-        """Start a timer to auto-update leaderboard after question time expires."""
+        """Start timer - reveals answers ONLY after time expires."""
         import asyncio
 
         timer_key = f"{self.room_code}_{question_id}"
@@ -394,26 +383,30 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         if timer_key in question_timers:
             question_timers[timer_key].cancel()
 
-        # Create timer task
         async def timer_task():
             try:
+                logger.info(f"⏰ Starting {duration}s timer for question {question_id}")
                 await asyncio.sleep(duration)
-                logger.info(f"Question timer expired for {timer_key}")
+                logger.info(f"✅ Timer expired for {timer_key} - revealing answers")
+
+                # Step 1: Reveal all answers
+                await self.reveal_all_answers(question_id)
+
+                # Step 2: Show leaderboard (with delay, then auto-advance)
                 await self.broadcast_leaderboard_update()
+
             except asyncio.CancelledError:
-                logger.info(f"Timer cancelled for {timer_key}")
+                logger.info(f"❌ Timer cancelled for {timer_key}")
             finally:
                 if timer_key in question_timers:
                     del question_timers[timer_key]
 
         question_timers[timer_key] = asyncio.create_task(timer_task())
 
-    # Event handlers for group messages
+    # Event handlers
     async def player_joined(self, event):
-        """Send player joined message to WebSocket."""
-        # Also send updated room state
+        """Send player joined message."""
         room_state = await self.get_room_state()
-
         await self.send(text_data=json.dumps({
             'type': 'player_joined',
             'player_id': event['player_id'],
@@ -423,10 +416,8 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         }))
 
     async def player_left(self, event):
-        """Send player left message to WebSocket."""
-        # Also send updated room state
+        """Send player left message."""
         room_state = await self.get_room_state()
-
         await self.send(text_data=json.dumps({
             'type': 'player_left',
             'player_id': event['player_id'],
@@ -436,21 +427,26 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         }))
 
     async def answer_submitted(self, event):
-        """Send answer submitted notification to WebSocket."""
+        """Send answer submitted notification (NO correctness info)."""
         await self.send(text_data=json.dumps({
             'type': 'answer_submitted',
             'player_id': event['player_id'],
             'player_name': event['player_name'],
-            'is_correct': event['is_correct'],
-            'correct_answer': event.get('correct_answer'),
             'question_id': event['question_id'],
-            'points_earned': event.get('points_earned', 0),
-            'total_score': event.get('total_score', 0),
+            'timestamp': event['timestamp']
+        }))
+
+    async def answers_revealed(self, event):
+        """Send answer reveal to ALL players at once."""
+        await self.send(text_data=json.dumps({
+            'type': 'answers_revealed',
+            'question_id': event['question_id'],
+            'answers': event['answers'],
             'timestamp': event['timestamp']
         }))
 
     async def game_started(self, event):
-        """Send game started message to WebSocket."""
+        """Send game started message."""
         await self.send(text_data=json.dumps({
             'type': 'game_started',
             'question': event['question'],
@@ -460,7 +456,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         }))
 
     async def next_question(self, event):
-        """Send next question to WebSocket."""
+        """Send next question."""
         await self.send(text_data=json.dumps({
             'type': 'next_question',
             'question': event['question'],
@@ -470,7 +466,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         }))
 
     async def game_complete(self, event):
-        """Send game complete message to WebSocket."""
+        """Send game complete message."""
         await self.send(text_data=json.dumps({
             'type': 'game_complete',
             'results': event['results'],
@@ -478,7 +474,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         }))
 
     async def chat_message(self, event):
-        """Send chat message to WebSocket."""
+        """Send chat message."""
         await self.send(text_data=json.dumps({
             'type': 'chat_message',
             'player_id': event['player_id'],
@@ -488,7 +484,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         }))
 
     async def game_state_update(self, event):
-        """Send game state update to WebSocket."""
+        """Send game state update."""
         await self.send(text_data=json.dumps({
             'type': 'game_state_update',
             'state': event.get('state', {}),
@@ -496,7 +492,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         }))
 
     async def room_state_update(self, event):
-        """Send room state update to WebSocket."""
+        """Send room state update."""
         await self.send(text_data=json.dumps({
             'type': 'room_state_update',
             'state': event['state'],
@@ -504,7 +500,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         }))
 
     async def leaderboard_update(self, event):
-        """Send leaderboard update to WebSocket."""
+        """Send leaderboard update."""
         await self.send(text_data=json.dumps({
             'type': 'leaderboard_update',
             'leaderboard': event['leaderboard'],
@@ -519,11 +515,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             room = Room.objects.get(code=self.room_code)
             if self.player_id:
                 player = Player.objects.get(id=self.player_id)
-                # Check if player is in the room
-                return RoomPlayer.objects.filter(
-                    room=room,
-                    player=player
-                ).exists()
+                return RoomPlayer.objects.filter(room=room, player=player).exists()
             return True
         except (ObjectDoesNotExist, ValueError):
             return False
@@ -533,10 +525,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
         """Get player information."""
         try:
             player = Player.objects.get(id=self.player_id)
-            return {
-                'id': str(player.id),
-                'username': player.username
-            }
+            return {'id': str(player.id), 'username': player.username}
         except ObjectDoesNotExist:
             return {'id': None, 'username': 'Unknown'}
 
@@ -551,38 +540,25 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def get_room_state(self):
-        """Get current room state with all players."""
+        """Get current room state."""
         try:
             room = Room.objects.prefetch_related('players__player').get(code=self.room_code)
-
             return {
                 'id': str(room.id),
                 'code': room.code,
-                'room_code': room.code,
                 'name': room.name,
-                'room_name': room.name,
-                'room_status': room.status,
                 'status': room.status,
                 'max_players': room.max_players,
-                'can_start': room.can_start,
                 'host_id': str(room.host.id),
-                'host': {
-                    'id': str(room.host.id),
-                    'username': room.host.username
-                },
                 'players': [
                     {
                         'id': str(rp.player.id),
-                        'player_id': str(rp.player.id),
                         'username': rp.player.username,
-                        'player_name': rp.player.username,
                         'score': rp.score,
-                        'is_ready': rp.is_ready,
                         'is_host': str(rp.player.id) == str(room.host.id)
                     }
                     for rp in room.players.all()
-                ],
-                'player_count': room.players.count()
+                ]
             }
         except ObjectDoesNotExist:
             return {'error': 'Room not found'}
@@ -591,14 +567,9 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
     def get_game_state(self):
         """Get current game state."""
         try:
-            room = Room.objects.prefetch_related('players__player').get(code=self.room_code)
-
+            room = Room.objects.get(code=self.room_code)
             try:
-                game = Game.objects.filter(
-                    room=room,
-                    status='active'
-                ).latest('created_at')
-
+                game = Game.objects.filter(room=room, status='active').latest('created_at')
                 current_question = game.current_question
                 question_data = None
                 if current_question:
@@ -607,43 +578,16 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                         'order': current_question.order,
                         'items': current_question.items,
                         'options': current_question.options,
-                        'hint': current_question.hint if hasattr(current_question, 'hint') else None,
-                        'time_limit': current_question.time_limit if hasattr(current_question, 'time_limit') else 30
+                        'hint': current_question.hint or '',
+                        'time_limit': current_question.time_limit or 30
                     }
-
                 return {
                     'room_code': room.code,
-                    'room_status': room.status,
                     'game_status': game.status,
-                    'current_question_index': game.current_question_index,
-                    'total_questions': game.total_questions,
-                    'current_question': question_data,
-                    'players': [
-                        {
-                            'id': str(rp.player.id),
-                            'username': rp.player.username,
-                            'score': rp.score,
-                            'is_host': str(rp.player.id) == str(room.host.id)
-                        }
-                        for rp in room.players.all()
-                    ]
+                    'current_question': question_data
                 }
             except Game.DoesNotExist:
-                return {
-                    'room_code': room.code,
-                    'room_status': room.status,
-                    'game_status': None,
-                    'players': [
-                        {
-                            'id': str(rp.player.id),
-                            'username': rp.player.username,
-                            'score': rp.score,
-                            'is_host': str(rp.player.id) == str(room.host.id)
-                        }
-                        for rp in room.players.all()
-                    ]
-                }
-
+                return {'room_code': room.code, 'game_status': None}
         except ObjectDoesNotExist:
             return {'error': 'Room not found'}
 
@@ -651,65 +595,37 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
     def start_game(self):
         """Start the game."""
         try:
-            from django.conf import settings
-            from ..games.services import GameService
-            from ..games.models import GameScore
-            
-            with transaction.atomic():
-                room = Room.objects.select_for_update().get(code=self.room_code)
+            room = Room.objects.get(code=self.room_code)
+            game = room.current_game
 
-                if Game.objects.filter(room=room, status='active').exists():
-                    return {'error': 'Game already in progress'}
+            if not game or game.status != 'pending':
+                return {'error': 'No pre-generated game available'}
 
-                game = Game.objects.create(
-                    room=room,
-                    status='active',
-                    current_question_index=0
-                )
-                
-                # Create game scores for all players
-                for room_player in room.players.all():
-                    GameScore.objects.create(
-                        game=game,
-                        player=room_player.player,
-                        total_score=0,
-                        correct_answers=0,
-                        wrong_answers=0
-                    )
-                
-                # Generate questions immediately
-                num_questions = getattr(settings, 'QUESTIONS_PER_GAME', 10)
-                game_service = GameService()
-                game_service.start_game(game, num_questions)
-                
-                # Refresh to get generated questions
-                game.refresh_from_db()
+            game.status = 'active'
+            game.save()
 
-                first_question = game.current_question
-                if not first_question:
-                    return {'error': 'No questions available'}
+            first_question = game.current_question
+            if not first_question:
+                return {'error': 'No questions available'}
 
-                return {
-                    'question': {
-                        'id': str(first_question.id),
-                        'order': first_question.order,
-                        'items': first_question.items,
-                        'options': first_question.options,
-                        'hint': getattr(first_question, 'hint', ''),
-                        'time_limit': getattr(first_question, 'time_limit', 30)
-                    },
-                    'total_questions': game.total_questions
-                }
-
-        except ObjectDoesNotExist:
-            return {'error': 'Room not found'}
+            return {
+                'question': {
+                    'id': str(first_question.id),
+                    'order': first_question.order,
+                    'items': first_question.items,
+                    'options': first_question.options,
+                    'hint': first_question.hint or '',
+                    'time_limit': first_question.time_limit or 30
+                },
+                'total_questions': game.total_questions
+            }
         except Exception as e:
             logger.error(f"Error starting game: {str(e)}", exc_info=True)
             return {'error': 'Failed to start game'}
 
     @database_sync_to_async
     def check_answer(self, answer, question_id, time_taken=0, used_hint=False):
-        """Check if answer is correct and update score."""
+        """Save answer but DON'T return if correct yet."""
         try:
             with transaction.atomic():
                 room = Room.objects.select_for_update().get(code=self.room_code)
@@ -717,18 +633,10 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                 player = Player.objects.get(id=self.player_id)
                 question = Question.objects.select_for_update().get(id=question_id, game=game)
 
-                existing_answer = Answer.objects.select_for_update().filter(
-                    question=question,
-                    player=player
-                ).first()
-
+                existing_answer = Answer.objects.filter(question=question, player=player).first()
                 if existing_answer:
                     return {
                         'player_name': player.username,
-                        'is_correct': existing_answer.is_correct,
-                        'correct_answer': question.correct_answer if not existing_answer.is_correct else None,
-                        'points_earned': existing_answer.points_earned,
-                        'total_score': GameScore.objects.get(game=game, player=player).total_score,
                         'already_answered': True
                     }
 
@@ -745,9 +653,8 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
 
                 points = answer_obj.calculate_points()
 
-                game_score, created = GameScore.objects.get_or_create(
-                    game=game,
-                    player=player,
+                game_score, _ = GameScore.objects.get_or_create(
+                    game=game, player=player,
                     defaults={'total_score': 0, 'correct_answers': 0, 'wrong_answers': 0}
                 )
                 game_score.update_score(answer_obj)
@@ -758,46 +665,45 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
 
                 return {
                     'player_name': player.username,
-                    'is_correct': is_correct,
-                    'correct_answer': question.correct_answer if not is_correct else None,
-                    'points_earned': points,
-                    'total_score': game_score.total_score,
                     'already_answered': False
                 }
-
-        except ObjectDoesNotExist as e:
-            logger.error(f"Object not found: {str(e)}")
-            return {'error': 'Game, player, or question not found', 'player_name': 'Unknown', 'is_correct': False}
         except Exception as e:
             logger.error(f"Error checking answer: {str(e)}", exc_info=True)
-            return {'error': 'Failed to check answer', 'player_name': 'Unknown', 'is_correct': False}
+            return {'error': 'Failed to check answer'}
 
     @database_sync_to_async
-    def check_all_players_answered(self, question_id):
-        """Check if all players in the room have answered the current question."""
+    def get_question_answers(self, question_id):
+        """Get all player answers for a question."""
         try:
-            room = Room.objects.prefetch_related('players__player').get(code=self.room_code)
-            game = Game.objects.get(room=room, status='active')
-            question = Question.objects.get(id=question_id, game=game)
+            question = Question.objects.get(id=question_id)
+            answers = Answer.objects.filter(question=question).select_related('player')
 
-            total_players = room.players.count()
-            answered_count = Answer.objects.filter(question=question).count()
-
-            return answered_count >= total_players
+            return {
+                'correct_answer': question.correct_answer,
+                'player_results': [
+                    {
+                        'player_id': str(ans.player.id),
+                        'player_name': ans.player.username,
+                        'is_correct': ans.is_correct,
+                        'points_earned': ans.points_earned,
+                        'answer_text': ans.answer_text,
+                        'used_hint': ans.used_hint
+                    }
+                    for ans in answers
+                ]
+            }
         except ObjectDoesNotExist:
-            return False
+            return {'correct_answer': None, 'player_results': []}
 
     @database_sync_to_async
     def get_current_leaderboard(self):
-        """Get current leaderboard for the game."""
+        """Get current leaderboard."""
         try:
             room = Room.objects.get(code=self.room_code)
             game = Game.objects.get(room=room, status='active')
-
             scores = GameScore.objects.filter(game=game).select_related('player').order_by(
                 '-total_score', 'created_at'
             )
-
             return [
                 {
                     'player_id': str(score.player.id),
@@ -818,7 +724,6 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             with transaction.atomic():
                 room = Room.objects.select_for_update().get(code=self.room_code)
                 game = Game.objects.select_for_update().get(room=room, status='active')
-
                 next_q = game.next_question()
 
                 if next_q is None:
@@ -832,48 +737,37 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
                         'order': next_q.order,
                         'items': next_q.items,
                         'options': next_q.options,
-                        'hint': getattr(next_q, 'hint', None),
-                        'time_limit': getattr(next_q, 'time_limit', 30),
-                        'correct_answer': next_q.correct_answer
+                        'hint': next_q.hint or '',
+                        'time_limit': next_q.time_limit or 30
                     },
                     'question_number': game.current_question_index + 1,
                     'total_questions': game.total_questions
                 }
-
-        except ObjectDoesNotExist:
-            return {'error': 'Game not found'}
         except Exception as e:
             logger.error(f"Error getting next question: {str(e)}", exc_info=True)
             return {'error': 'Failed to get next question'}
 
     @database_sync_to_async
     def get_hint(self, question_id):
-        """Get hint for current question."""
+        """Get hint for question."""
         try:
             question = Question.objects.get(id=question_id)
-            return getattr(question, 'hint', None)
+            hint = question.hint or ''
+            logger.info(f"Retrieved hint for question {question_id}: {hint}")
+            return hint
         except ObjectDoesNotExist:
+            logger.error(f"Question {question_id} not found")
             return None
-
-    async def all_players_answered(self, event):
-        """Send notification that all players have answered."""
-        await self.send(text_data=json.dumps({
-            'type': 'all_players_answered',
-            'state': event.get('state', {}),
-            'timestamp': event.get('timestamp', self._get_timestamp())
-        }))
 
     @database_sync_to_async
     def get_final_results(self):
-        """Calculate final game results."""
+        """Calculate final results."""
         try:
             room = Room.objects.get(code=self.room_code)
             game = Game.objects.get(room=room)
-
-            results = GameScore.objects.filter(
-                game=game
-            ).select_related('player').order_by('-total_score', 'created_at')
-
+            results = GameScore.objects.filter(game=game).select_related('player').order_by(
+                '-total_score', 'created_at'
+            )
             return [
                 {
                     'player_id': str(score.player.id),
@@ -889,7 +783,7 @@ class GameRoomConsumer(AsyncWebsocketConsumer):
             return []
 
     async def send_error(self, message):
-        """Send error message to client."""
+        """Send error message."""
         await self.send(text_data=json.dumps({
             'type': 'error',
             'message': message,

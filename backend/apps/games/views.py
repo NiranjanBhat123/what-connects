@@ -1,5 +1,6 @@
 """
-Game views.
+Game views - FIXED VERSION
+Fixed final standings endpoint
 """
 import logging
 from rest_framework import generics, status
@@ -62,7 +63,6 @@ class SubmitAnswerView(APIView):
         serializer.is_valid(raise_exception=True)
 
         try:
-            # Get objects with proper locking
             game = get_object_or_404(Game.objects.select_for_update(), id=game_id)
             player = get_object_or_404(Player, id=serializer.validated_data['player_id'])
             question = get_object_or_404(
@@ -72,14 +72,14 @@ class SubmitAnswerView(APIView):
             )
 
             # Validate game is active
-            if game.status != 'active':
+            if game.status not in ['active', 'pending']:
                 raise GameException(
                     detail='Cannot submit answers for completed games.',
                     code='game_completed'
                 )
 
-            # Validate player is in the room/game
-            if not game.room.players.filter(id=player.id).exists():
+            # Validate player is in the game
+            if not game.room.players.filter(player=player).exists():
                 raise GameException(
                     detail='Player is not part of this game.',
                     code='player_not_in_game'
@@ -92,7 +92,7 @@ class SubmitAnswerView(APIView):
                     code='invalid_question'
                 )
 
-            # Check if answer already exists (with locking to prevent race condition)
+            # Check if answer already exists
             existing_answer = Answer.objects.select_for_update().filter(
                 question=question,
                 player=player
@@ -109,12 +109,9 @@ class SubmitAnswerView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Validate time taken (reject if exceeded)
+            # Validate time taken
             time_taken = serializer.validated_data['time_taken']
             if time_taken > question.time_limit:
-                logger.warning(
-                    f"Player {player.username} exceeded time limit for question {question.id}"
-                )
                 return Response(
                     {
                         'error': {
@@ -125,19 +122,18 @@ class SubmitAnswerView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Validate time taken is not negative
             if time_taken < 0:
                 raise GameException(
                     detail='Invalid time taken value.',
                     code='invalid_time_taken'
                 )
 
-            # Check if answer is correct (case-insensitive, strip whitespace)
+            # Check if answer is correct
             answer_text = serializer.validated_data['answer_text'].strip().lower()
             correct_answer = question.correct_answer.strip().lower()
             is_correct = answer_text == correct_answer
 
-            # Create answer
+            # Create answer with calculated points
             answer = Answer.objects.create(
                 question=question,
                 player=player,
@@ -147,10 +143,12 @@ class SubmitAnswerView(APIView):
                 time_taken=time_taken
             )
 
-            # Calculate points
+            # Calculate and save points
             points = answer.calculate_points()
+            answer.points_earned = points
+            answer.save(update_fields=['points_earned'])
 
-            # Update or create game score
+            # Update game score
             game_score, created = GameScore.objects.select_for_update().get_or_create(
                 game=game,
                 player=player,
@@ -170,7 +168,6 @@ class SubmitAnswerView(APIView):
                 'answer': AnswerSerializer(answer).data
             }
 
-            # Only show correct answer if player got it wrong
             if not is_correct:
                 response_data['correct_answer'] = question.correct_answer
 
@@ -198,7 +195,7 @@ class GameLeaderboardView(APIView):
             id=pk
         )
 
-        # Lock all scores for this game to prevent concurrent rank updates
+        # Get all scores
         scores = GameScore.objects.select_for_update().filter(game=game).select_related('player').order_by(
             '-total_score', 'created_at'
         )
@@ -210,7 +207,7 @@ class GameLeaderboardView(APIView):
         scores_to_update = []
 
         for score in scores:
-            # Handle ties - same score gets same rank
+            # Handle ties
             if previous_score is not None and score.total_score < previous_score:
                 current_rank = rank_counter
 
@@ -221,7 +218,7 @@ class GameLeaderboardView(APIView):
             previous_score = score.total_score
             rank_counter += 1
 
-        # Bulk update ranks if any changed
+        # Bulk update ranks
         if scores_to_update:
             GameScore.objects.bulk_update(scores_to_update, ['rank'])
 
@@ -254,14 +251,13 @@ class GameQuestionsView(generics.ListAPIView):
 
 
 class NextQuestionView(APIView):
-    """Advance to the next question (host only)."""
+    """Advance to next question (host only)."""
     permission_classes = [AllowAny]
 
     @transaction.atomic
     def post(self, request, game_id):
         """Move to next question."""
         try:
-            # Lock the game
             game = get_object_or_404(
                 Game.objects.select_for_update().select_related('room'),
                 id=game_id
@@ -274,7 +270,7 @@ class NextQuestionView(APIView):
                     code='game_not_active'
                 )
 
-            # Validate host (get player_id from request)
+            # Validate host
             player_id = request.data.get('player_id')
             if not player_id:
                 raise GameException(
@@ -284,7 +280,6 @@ class NextQuestionView(APIView):
 
             player = get_object_or_404(Player, id=player_id)
 
-            # Check if player is the host
             if game.room.host_id != player.id:
                 from ..core.exceptions import NotHostException
                 raise NotHostException()
@@ -317,6 +312,7 @@ class NextQuestionView(APIView):
                 code='next_question_failed'
             )
 
+
 class CurrentQuestionView(APIView):
     """Get the current question for an active game."""
     permission_classes = [AllowAny]
@@ -328,7 +324,7 @@ class CurrentQuestionView(APIView):
             id=game_id
         )
 
-        if game.status != 'active':
+        if game.status not in ['active', 'pending']:
             raise GameException(
                 detail='Game is not active.',
                 code='game_not_active'
@@ -349,4 +345,34 @@ class CurrentQuestionView(APIView):
             'current_question_index': game.current_question_index,
             'total_questions': game.total_questions,
             'progress_percentage': round((game.current_question_index / game.total_questions) * 100, 2) if game.total_questions > 0 else 0
+        })
+
+
+class RoomGamesListView(APIView):
+    """Get all games for a room (for results page)."""
+    permission_classes = [AllowAny]
+
+    def get(self, request, room_code):
+        """Get games for a room."""
+        from ..rooms.models import Room
+
+        room = get_object_or_404(Room, code=room_code)
+
+        # Get all games for this room, ordered by most recent first
+        games = Game.objects.filter(room=room).order_by('-created_at')
+
+        games_data = []
+        for game in games:
+            games_data.append({
+                'id': str(game.id),
+                'status': game.status,
+                'started_at': game.started_at,
+                'completed_at': game.completed_at,
+                'total_questions': game.total_questions,
+                'current_question_index': game.current_question_index
+            })
+
+        return Response({
+            'room_code': room_code,
+            'games': games_data
         })
