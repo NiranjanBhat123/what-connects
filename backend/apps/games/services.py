@@ -1,5 +1,6 @@
 """
 Game services for question generation - MCQ Format.
+FIXED: Questions are generated when room is created (pending status).
 """
 import json
 import logging
@@ -28,7 +29,7 @@ class QuestionGeneratorService:
         Generate questions for a game.
 
         Args:
-            game: Game instance
+            game: Game instance (can be in 'pending' or 'active' status)
             num_questions: Number of questions to generate
 
         Returns:
@@ -286,7 +287,7 @@ Return ONLY the JSON array, nothing else."""
                 "hint": "Wizarding world created by J.K. Rowling"
             },
             {
-                "items": ["Pikachu", "Charizard", "Ash", "Pokéballs"],
+                "items": ["Pikachu", "Charizard", "Ash", "PokéBalls"],
                 "options": ["Pokémon", "Digimon", "Yu-Gi-Oh", "Dragon Ball"],
                 "correct_answer": "Pokémon",
                 "hint": "Gotta catch 'em all!"
@@ -392,13 +393,44 @@ class GameService:
         self.question_generator = QuestionGeneratorService()
 
     @transaction.atomic
+    def pre_generate_questions(self, game: Game, num_questions: int = 10) -> Game:
+        """
+        Pre-generate questions for a pending game (called when room is created).
+
+        Args:
+            game: Game instance in 'pending' status
+            num_questions: Number of questions to generate
+
+        Returns:
+            Game instance with questions
+
+        Raises:
+            QuestionGenerationException: If question generation fails
+        """
+        if game.status not in ['pending', 'active']:
+            raise ValueError(f"Cannot generate questions for game in {game.status} status")
+
+        # Generate questions
+        questions = self.question_generator.generate_questions(game, num_questions)
+
+        if not questions:
+            raise QuestionGenerationException("No questions were generated")
+
+        logger.info(f"✅ Pre-generated {len(questions)} questions for game {game.id}")
+        return game
+
+    @transaction.atomic
     def start_game(self, game: Game, num_questions: int = 10) -> Game:
         """
-        Start a game by generating questions.
+        Activate a game with pre-generated questions OR generate new ones.
+
+        This method now works for BOTH:
+        1. Activating pending games with pre-generated questions
+        2. Generating questions for new active games (backward compatibility)
 
         Args:
             game: Game instance
-            num_questions: Number of questions to generate
+            num_questions: Number of questions to generate (if not pre-generated)
 
         Returns:
             Updated Game instance
@@ -406,10 +438,12 @@ class GameService:
         Raises:
             QuestionGenerationException: If question generation fails
         """
-        if game.status != 'active':
-            raise ValueError("Game is not in active status")
+        # If game already has questions, just return it
+        if game.total_questions > 0:
+            logger.info(f"Game {game.id} already has {game.total_questions} questions")
+            return game
 
-        # Generate questions
+        # Otherwise, generate questions
         questions = self.question_generator.generate_questions(game, num_questions)
 
         if not questions:
@@ -441,7 +475,7 @@ class GameService:
             'current_question_index': current_index,
             'total_questions': total_questions,
             'progress_percentage': progress_percentage,
-            'is_completed': game.is_completed,
+            'is_completed': game.status == 'completed',
         }
 
     def calculate_final_rankings(self, game: Game) -> List[Dict[str, Any]]:

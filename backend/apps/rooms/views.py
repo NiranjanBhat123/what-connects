@@ -1,6 +1,5 @@
 """
-Room views.
-FIXED VERSION with WebSocket game start broadcasting.
+Room views - FIXED VERSION with better error handling
 """
 import logging
 from rest_framework import generics, status
@@ -32,42 +31,132 @@ logger = logging.getLogger(__name__)
 
 
 class RoomCreateView(generics.CreateAPIView):
-    """Create a new game room."""
+    """Create a new game room with IMMEDIATE question generation."""
     queryset = Room.objects.all()
     serializer_class = RoomCreateSerializer
     permission_classes = [AllowAny]
 
-    @transaction.atomic
     def create(self, request, *args, **kwargs):
+        """Create room and IMMEDIATELY generate questions."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        # Get host player
-        host = get_object_or_404(Player, id=serializer.validated_data['host_id'])
-
         try:
-            # Create room with retry logic for unique code
-            room = Room.objects.create(
-                name=serializer.validated_data['name'],
-                max_players=serializer.validated_data['max_players'],
-                host=host
+            host = Player.objects.get(id=serializer.validated_data['host_id'])
+        except Player.DoesNotExist:
+            return Response(
+                {'error': 'Player not found'},
+                status=status.HTTP_404_NOT_FOUND
             )
 
-            # Add host as first player
-            RoomPlayer.objects.create(
-                room=room,
-                player=host
-            )
+        room = None
+        try:
+            # Create room and add host (atomic)
+            with transaction.atomic():
+                room = Room.objects.create(
+                    name=serializer.validated_data['name'],
+                    max_players=serializer.validated_data['max_players'],
+                    host=host
+                )
+
+                # Add host as first player
+                RoomPlayer.objects.create(
+                    room=room,
+                    player=host
+                )
 
             logger.info(f"Room {room.code} created by {host.username}")
 
+            # ====== IMMEDIATELY PRE-GENERATE GAME AND QUESTIONS ======
+            from ..games.models import Game, GameScore
+            from ..games.services import GameService
+
+            try:
+                with transaction.atomic():
+                    # Create game in 'pending' status (started_at will be None)
+                    game = Game.objects.create(
+                        room=room,
+                        status='pending',
+                        current_question_index=0
+                        # started_at and completed_at will be None for pending games
+                    )
+
+                    # Generate questions IMMEDIATELY
+                    num_questions = getattr(settings, 'QUESTIONS_PER_GAME', 10)
+                    game_service = GameService()
+
+                    logger.info(f"Starting question generation for room {room.code}...")
+
+                    # Call the service to generate questions
+                    try:
+                        game_service.start_game(game, num_questions)
+                    except AttributeError as ae:
+                        logger.error(f"GameService method error: {str(ae)}")
+                        raise QuestionGenerationException(
+                            detail='Game service not properly configured. Please contact support.'
+                        )
+                    except Exception as gen_error:
+                        logger.error(f"Question generation failed: {str(gen_error)}", exc_info=True)
+                        raise QuestionGenerationException(
+                            detail=f'Failed to generate questions: {str(gen_error)}'
+                        )
+
+                    # Refresh to verify questions were created
+                    game.refresh_from_db()
+
+                    if game.total_questions == 0:
+                        raise QuestionGenerationException('No questions were generated')
+
+                    logger.info(f"✅ Successfully pre-generated {game.total_questions} questions for room {room.code}")
+
+                    # Link game to room
+                    room.current_game = game
+                    room.save()
+
+            except QuestionGenerationException:
+                # Clean up room if question generation fails
+                if room:
+                    logger.error(f"Deleting room {room.code} due to question generation failure")
+                    room.delete()
+                raise
+            except Exception as e:
+                logger.error(f"❌ Failed to pre-generate questions: {str(e)}", exc_info=True)
+                # Delete the room if question generation fails
+                if room:
+                    room.delete()
+                return Response(
+                    {'error': f'Failed to generate questions: {str(e)}'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            # Refresh room to get latest data
+            room.refresh_from_db()
             response_serializer = RoomSerializer(room)
             return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
-        except IntegrityError as e:
-            logger.error(f"Failed to create room: {str(e)}")
+        except QuestionGenerationException as qge:
+            logger.error(f"Question generation exception: {str(qge)}")
             return Response(
-                {'error': 'Failed to create room. Please try again.'},
+                {'error': str(qge.detail) if hasattr(qge, 'detail') else 'Failed to generate questions'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except IntegrityError as e:
+            logger.error(f"Database integrity error: {str(e)}")
+            if room:
+                room.delete()
+            return Response(
+                {'error': 'Failed to create room due to database error. Please try again.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error creating room: {str(e)}", exc_info=True)
+            if room:
+                try:
+                    room.delete()
+                except Exception:
+                    pass
+            return Response(
+                {'error': f'An unexpected error occurred: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -187,7 +276,6 @@ class RoomLeaveView(APIView):
     def _cleanup_room_games(self, room):
         """Clean up games associated with room before deletion."""
         try:
-            # Import here to avoid circular import
             from ..games.models import Game
             games = Game.objects.filter(room=room)
             count = games.count()
@@ -198,7 +286,7 @@ class RoomLeaveView(APIView):
 
 
 class RoomStartGameView(APIView):
-    """Start the game in a room."""
+    """Start the game - Questions ALREADY pre-generated."""
     permission_classes = [AllowAny]
 
     @transaction.atomic
@@ -234,62 +322,55 @@ class RoomStartGameView(APIView):
 
         logger.info(f"Starting game in room {room.code}")
 
-        # Import here to avoid circular imports
         from ..games.models import Game, GameScore
-        from ..games.services import GameService
 
         try:
-            # Create game
-            game = Game.objects.create(
-                room=room,
-                status='active',
-                current_question_index=0
-            )
+            # Use the pre-generated game
+            game = room.current_game
 
-            # Create game scores for all players in room
-            for room_player in room.players.all():
-                GameScore.objects.create(
-                    game=game,
-                    player=room_player.player,
-                    total_score=0,
-                    correct_answers=0,
-                    wrong_answers=0
+            if not game or game.status != 'pending':
+                raise QuestionGenerationException(
+                    detail='No pre-generated game found. Please create a new room.'
                 )
-
-            # Generate questions - if this fails, rollback everything
-            num_questions = getattr(settings, 'QUESTIONS_PER_GAME', 10)
-            game_service = GameService()
-            game_service.start_game(game, num_questions)
-
-            # Refresh game to get questions
-            game.refresh_from_db()
 
             if game.total_questions == 0:
                 raise QuestionGenerationException(
-                    detail='Failed to generate questions for the game'
+                    detail='No questions available. Please create a new room.'
                 )
 
-            # Update room status only after successful question generation
+            logger.info(f"Using pre-generated game with {game.total_questions} questions")
+
+            # Activate the game and set started_at
+            from django.utils import timezone
+            game.status = 'active'
+            game.started_at = timezone.now()
+            game.save()
+
+            # Create game scores for all players
+            for room_player in room.players.all():
+                GameScore.objects.get_or_create(
+                    game=game,
+                    player=room_player.player,
+                    defaults={'total_score': 0, 'correct_answers': 0, 'wrong_answers': 0}
+                )
+
+            # Update room status
             room.status = 'in_progress'
-            room.current_game = game
             room.save()
 
-            logger.info(f"Generated {game.total_questions} questions for game {game.id}")
+            logger.info(f"✅ Game started successfully with {game.total_questions} questions")
 
             # Get first question for broadcasting
             first_question = game.current_question
 
-            # Broadcast game start via WebSocket - CRITICAL - FIXED
+            # Broadcast game start via WebSocket
             channel_layer = get_channel_layer()
             if channel_layer and first_question:
-                from asgiref.sync import async_to_sync
-
                 game_started_data = {
                     'type': 'game_started',
                     'question': {
                         'id': str(first_question.id),
                         'order': first_question.order,
-                        # FIXED: Use 'items' and 'options' instead of 'text'
                         'items': first_question.items,
                         'options': first_question.options,
                         'hint': first_question.hint if first_question.hint else '',
@@ -300,24 +381,23 @@ class RoomStartGameView(APIView):
                     'timestamp': game.created_at.isoformat() + 'Z'
                 }
 
-                logger.info(f"Broadcasting game_started event for room {room.code}: {game_started_data}")
+                logger.info(f"Broadcasting game_started event for room {room.code}")
 
                 async_to_sync(channel_layer.group_send)(
                     f'game_room_{room.code}',
                     game_started_data
                 )
-                logger.info(f"Successfully broadcasted game_started event for room {room.code}")
 
             response_serializer = RoomSerializer(room)
             return Response(response_serializer.data)
 
         except QuestionGenerationException as e:
-            logger.error(f"Question generation failed for room {room.code}: {str(e)}")
+            logger.error(f"Game start failed: {str(e)}")
             raise
         except Exception as e:
-            logger.error(f"Error starting game in room {room.code}: {str(e)}", exc_info=True)
+            logger.error(f"Error starting game: {str(e)}", exc_info=True)
             return Response(
-                {'error': {'code': 'game_start_failed', 'message': 'Failed to start game. Please try again.'}},
+                {'error': {'code': 'game_start_failed', 'message': 'Failed to start game'}},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 

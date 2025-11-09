@@ -43,7 +43,28 @@ export default function CreateRoomPage() {
             toast.success('Room created successfully!');
             navigate(`/room/${response.data.code}`);
         } catch (error) {
-            const errorMsg = error.response?.data?.error || 'Failed to create room';
+            console.error('Room creation error:', error);
+
+            // Extract error message properly
+            let errorMsg = 'Failed to create room';
+
+            if (error.response?.data) {
+                const errorData = error.response.data;
+
+                // Handle different error response formats
+                if (typeof errorData.error === 'string') {
+                    errorMsg = errorData.error;
+                } else if (errorData.error?.message) {
+                    errorMsg = errorData.error.message;
+                } else if (errorData.detail) {
+                    errorMsg = errorData.detail;
+                } else if (errorData.message) {
+                    errorMsg = errorData.message;
+                }
+            } else if (error.message) {
+                errorMsg = error.message;
+            }
+
             toast.error(errorMsg);
         } finally {
             setIsLoading(false);

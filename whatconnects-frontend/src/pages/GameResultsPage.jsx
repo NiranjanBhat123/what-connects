@@ -1,3 +1,5 @@
+// GameResultsPage.jsx - FIXED to properly load final standings
+
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
@@ -8,13 +10,15 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
 import { useGameStore } from '@/store/gameStore';
-import { gameAPI } from '@/services/api';
+import { gameAPI, roomAPI } from '@/services/api';
 
 export default function GameResultsPage() {
     const { code } = useParams();
     const navigate = useNavigate();
-    const { player, leaderboard, setLeaderboard } = useGameStore();
+    const { player } = useGameStore();
+    const [leaderboard, setLeaderboard] = useState([]);
     const [showConfetti, setShowConfetti] = useState(true);
+    const [isLoading, setIsLoading] = useState(true);
     const [windowSize, setWindowSize] = useState({
         width: window.innerWidth,
         height: window.innerHeight,
@@ -47,13 +51,68 @@ export default function GameResultsPage() {
 
     const loadResults = async () => {
         try {
-            // Load leaderboard if not already loaded
-            if (leaderboard.length === 0) {
-                const response = await gameAPI.getLeaderboard(code);
-                setLeaderboard(response.data.leaderboard);
+            setIsLoading(true);
+
+            // ====== FIXED: Get room first to find the completed game ======
+            const roomResponse = await roomAPI.get(code);
+            console.log('Room data:', roomResponse.data);
+
+            // Find the most recent game for this room
+            // The room should have a current_game or we need to get it from the API
+            let gameId = null;
+
+            // Try to get game ID from room data
+            if (roomResponse.data.current_game?.id) {
+                gameId = roomResponse.data.current_game.id;
+            } else if (roomResponse.data.id) {
+                // If no current_game, we need to find the completed game
+                // This requires a backend endpoint to get games by room
+                // For now, try to use the room's game history
+                try {
+                    const gamesResponse = await fetch(
+                        `${import.meta.env.VITE_API_BASE_URL}/api/rooms/${code}/games/`
+                    );
+                    const gamesData = await gamesResponse.json();
+
+                    // Get the most recent completed game
+                    const completedGames = gamesData.games?.filter(g => g.status === 'completed') || [];
+                    if (completedGames.length > 0) {
+                        gameId = completedGames[0].id;
+                    }
+                } catch (error) {
+                    console.error('Error fetching games:', error);
+                }
             }
+
+            if (!gameId) {
+                console.error('No game ID found');
+                toast.error('Could not load game results');
+                setIsLoading(false);
+                return;
+            }
+
+            console.log('Loading leaderboard for game:', gameId);
+
+            // ====== FIXED: Get leaderboard from game API ======
+            const leaderboardResponse = await gameAPI.getLeaderboard(gameId);
+            console.log('Leaderboard data:', leaderboardResponse.data);
+
+            if (leaderboardResponse.data.leaderboard) {
+                setLeaderboard(leaderboardResponse.data.leaderboard);
+            } else {
+                toast.error('No results available');
+            }
+
+            setIsLoading(false);
         } catch (error) {
+            console.error('Failed to load results:', error);
             toast.error('Failed to load results');
+            setIsLoading(false);
+
+            // Fallback: Navigate back after 3 seconds
+            setTimeout(() => {
+                navigate('/');
+            }, 3000);
         }
     };
 
@@ -84,8 +143,9 @@ export default function GameResultsPage() {
     };
 
     const handleShare = () => {
+        const playerResult = leaderboard.find(p => p.player_id === player.id);
         const text = `I just played WhatConnects and scored ${
-            leaderboard.find(p => p.player_id === player.id)?.total_score || 0
+            playerResult?.total_score || 0
         } points! Can you beat me?`;
 
         if (navigator.share) {
@@ -99,11 +159,41 @@ export default function GameResultsPage() {
         }
     };
 
+    // ====== LOADING STATE ======
+    if (isLoading) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-purple-50 to-pink-50">
+                <div className="bg-white rounded-xl shadow-lg p-8 text-center">
+                    <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-purple-600 mx-auto mb-4"></div>
+                    <p className="text-lg text-gray-600">Loading results...</p>
+                </div>
+            </div>
+        );
+    }
+
+    // ====== NO RESULTS STATE ======
+    if (leaderboard.length === 0) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-purple-50 to-pink-50">
+                <Card className="p-8 text-center max-w-md">
+                    <Trophy className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+                    <h2 className="text-2xl font-bold mb-2">No Results Available</h2>
+                    <p className="text-gray-600 mb-6">We couldn't load the game results.</p>
+                    <Button onClick={() => navigate('/')}>
+                        <Home className="w-4 h-4 mr-2" />
+                        Back to Home
+                    </Button>
+                </Card>
+            </div>
+        );
+    }
+
     const playerResult = leaderboard.find(p => p.player_id === player.id);
-    const isWinner = playerResult?.rank === 1;
+    const playerRank = playerResult ? (leaderboard.findIndex(p => p.player_id === player.id) + 1) : null;
+    const isWinner = playerRank === 1;
 
     return (
-        <div className="min-h-screen py-12 px-4 relative">
+        <div className="min-h-screen py-12 px-4 relative bg-gradient-to-br from-purple-50 to-pink-50">
             {showConfetti && (
                 <Confetti
                     width={windowSize.width}
@@ -140,6 +230,10 @@ export default function GameResultsPage() {
                         >
                             🎉 Congratulations, {player.username}! You won! 🎉
                         </motion.p>
+                    ) : playerRank ? (
+                        <p className="text-xl text-gray-600">
+                            Great game, {player.username}! You finished #{playerRank}
+                        </p>
                     ) : (
                         <p className="text-xl text-gray-600">
                             Great game, {player.username}!
@@ -159,7 +253,7 @@ export default function GameResultsPage() {
                         <Card className="p-4 text-center bg-gradient-to-b from-gray-100 to-gray-200 h-48 flex flex-col justify-end">
                             <div className="mb-2">{getMedalIcon(2)}</div>
                             <div className="w-16 h-16 rounded-full bg-gradient-to-br from-gray-400 to-gray-600 mx-auto mb-2 flex items-center justify-center text-white text-2xl font-bold">
-                                {leaderboard[1]?.player_name?.[0]}
+                                {leaderboard[1]?.player_name?.[0]?.toUpperCase() || '2'}
                             </div>
                             <p className="font-bold text-sm truncate">{leaderboard[1]?.player_name}</p>
                             <Badge variant="secondary" className="mt-1">
@@ -171,7 +265,7 @@ export default function GameResultsPage() {
                         <Card className="p-4 text-center bg-gradient-to-b from-yellow-100 to-yellow-200 h-56 flex flex-col justify-end">
                             <div className="mb-2">{getMedalIcon(1)}</div>
                             <div className="w-20 h-20 rounded-full bg-gradient-to-br from-yellow-400 to-yellow-600 mx-auto mb-2 flex items-center justify-center text-white text-3xl font-bold">
-                                {leaderboard[0]?.player_name?.[0]}
+                                {leaderboard[0]?.player_name?.[0]?.toUpperCase() || '1'}
                             </div>
                             <p className="font-bold truncate">{leaderboard[0]?.player_name}</p>
                             <Badge className="mt-1 bg-yellow-600">
@@ -183,7 +277,7 @@ export default function GameResultsPage() {
                         <Card className="p-4 text-center bg-gradient-to-b from-orange-100 to-orange-200 h-40 flex flex-col justify-end">
                             <div className="mb-2">{getMedalIcon(3)}</div>
                             <div className="w-14 h-14 rounded-full bg-gradient-to-br from-orange-400 to-orange-600 mx-auto mb-2 flex items-center justify-center text-white text-xl font-bold">
-                                {leaderboard[2]?.player_name?.[0]}
+                                {leaderboard[2]?.player_name?.[0]?.toUpperCase() || '3'}
                             </div>
                             <p className="font-bold text-sm truncate">{leaderboard[2]?.player_name}</p>
                             <Badge variant="secondary" className="mt-1">
@@ -203,7 +297,9 @@ export default function GameResultsPage() {
                         <h2 className="text-2xl font-bold mb-4">Final Standings</h2>
                         <div className="space-y-2">
                             {leaderboard.map((result, idx) => {
-                                const isCurrentPlayer = result.player_id === player.id;
+                                const isCurrentPlayer = result.player_id === player?.id;
+                                const rank = idx + 1;
+
                                 return (
                                     <motion.div
                                         key={result.player_id}
@@ -218,12 +314,12 @@ export default function GameResultsPage() {
                                     >
                                         <div className="flex items-center gap-4">
                                             <div className="flex-shrink-0">
-                                                {getMedalIcon(result.rank || idx + 1)}
+                                                {getMedalIcon(rank)}
                                             </div>
 
                                             <div className="flex items-center gap-3">
-                                                <div className={`w-12 h-12 rounded-full bg-gradient-to-br ${getMedalColor(result.rank || idx + 1)} flex items-center justify-center text-white font-bold`}>
-                                                    {result.player_name[0]}
+                                                <div className={`w-12 h-12 rounded-full bg-gradient-to-br ${getMedalColor(rank)} flex items-center justify-center text-white font-bold`}>
+                                                    {result.player_name?.[0]?.toUpperCase() || rank}
                                                 </div>
                                                 <div>
                                                     <p className="font-bold text-lg">
@@ -233,7 +329,7 @@ export default function GameResultsPage() {
                                                         )}
                                                     </p>
                                                     <p className="text-sm text-gray-600">
-                                                        {result.correct_answers} correct • {result.accuracy}% accuracy
+                                                        {result.correct_answers || 0} correct • {result.accuracy || 0}% accuracy
                                                     </p>
                                                 </div>
                                             </div>

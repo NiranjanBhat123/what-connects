@@ -1,5 +1,5 @@
 """
-Enhanced admin configuration for games app.
+Enhanced admin configuration for games app - FIXED FOR PENDING STATUS
 """
 from django.contrib import admin
 from django.utils.html import format_html
@@ -53,8 +53,8 @@ class QuestionInline(admin.TabularInline):
                 percentage = (correct / total) * 100
                 color = 'green' if percentage >= 50 else 'orange' if percentage >= 25 else 'red'
                 return format_html(
-                    '<span style="color: {}; font-weight: bold;">{:.1f}%</span>',
-                    color, percentage
+                    '<span style="color: {}; font-weight: bold;">{}%</span>',
+                    color, f'{percentage:.1f}'
                 )
         return '-'
     correct_rate.short_description = 'Correct %'
@@ -77,8 +77,8 @@ class GameScoreInline(admin.TabularInline):
         else:
             color = 'red'
         return format_html(
-            '<span style="color: {}; font-weight: bold;">{:.1f}%</span>',
-            color, accuracy
+            '<span style="color: {}; font-weight: bold;">{}%</span>',
+            color, f'{accuracy:.1f}'
         )
     accuracy_display.short_description = 'Accuracy'
 
@@ -96,13 +96,13 @@ class GameScoreInline(admin.TabularInline):
 
 @admin.register(Game)
 class GameAdmin(TimeStampedAdmin):
-    """Enhanced admin interface for Game model."""
+    """Enhanced admin interface for Game model with PENDING status support."""
     list_display = ['game_id_short', 'room_display', 'status_display', 'progress_display', 'player_count', 'duration', 'started_at']
     search_fields = ['room__code', 'room__name', 'id']
     list_filter = ['status', 'started_at', 'created_at']
     readonly_fields = ['id', 'game_stats', 'started_at', 'completed_at', 'created_at', 'updated_at']
     inlines = [QuestionInline, GameScoreInline]
-    date_hierarchy = 'started_at'
+    date_hierarchy = 'created_at'
 
     fieldsets = (
         ('Game Info', {
@@ -136,20 +136,36 @@ class GameAdmin(TimeStampedAdmin):
     room_display.short_description = 'Room'
 
     def status_display(self, obj):
-        """Display status with color."""
+        """Display status with color - INCLUDES PENDING."""
         colors = {
-            'active': 'orange',
-            'completed': 'green',
+            'pending': '#FF9800',  # Orange for pending
+            'active': '#2196F3',   # Blue for active
+            'completed': '#4CAF50', # Green for completed
+        }
+        icons = {
+            'pending': '⏳',
+            'active': '▶️',
+            'completed': '✅',
         }
         return format_html(
-            '<span style="color: {}; font-weight: bold;">{}</span>',
-            colors.get(obj.status, 'gray'), obj.status.upper()
+            '<span style="color: {}; font-weight: bold;">{} {}</span>',
+            colors.get(obj.status, 'gray'),
+            icons.get(obj.status, ''),
+            obj.status.upper()
         )
     status_display.short_description = 'Status'
 
     def progress_display(self, obj):
         """Display progress bar."""
         total = obj.total_questions
+
+        # For pending games, show "Pre-generated"
+        if obj.status == 'pending':
+            return format_html(
+                '<span style="color: #FF9800; font-weight: bold;">⏳ Pre-generated ({} questions ready)</span>',
+                total
+            )
+
         current = obj.current_question_index + 1
         if total > 0:
             percentage = (current / total) * 100
@@ -166,17 +182,26 @@ class GameAdmin(TimeStampedAdmin):
     def player_count(self, obj):
         """Show number of players."""
         count = obj.scores.count()
+        if obj.status == 'pending':
+            # For pending games, show room player count
+            room_player_count = obj.room.players.count()
+            return format_html('<strong>{}</strong> players (waiting)', room_player_count)
         return format_html('<strong>{}</strong> players', count)
     player_count.short_description = 'Players'
 
     def duration(self, obj):
         """Calculate game duration."""
-        if obj.completed_at and obj.started_at:
+        if obj.status == 'pending':
+            return '⏳ Not started'
+        elif obj.completed_at and obj.started_at:
             delta = obj.completed_at - obj.started_at
             minutes = delta.total_seconds() / 60
-            return f"{minutes:.1f} min"
+            return f"✅ {minutes:.1f} min"
         elif obj.started_at:
-            return "In progress"
+            from django.utils import timezone
+            delta = timezone.now() - obj.started_at
+            minutes = delta.total_seconds() / 60
+            return f"▶️ {minutes:.1f} min (in progress)"
         return "-"
     duration.short_description = 'Duration'
 
@@ -185,22 +210,36 @@ class GameAdmin(TimeStampedAdmin):
         if not obj.id:
             return '-'
 
+        # For pending games, show different stats
+        if obj.status == 'pending':
+            return format_html(
+                '<div style="background: #FFF3E0; padding: 15px; border-radius: 5px; border: 2px solid #FF9800;">'
+                '<p style="margin: 0; color: #E65100;"><strong>⏳ Pre-generated Game (Ready to Start)</strong></p>'
+                '<p style="margin: 8px 0 0 0;"><strong>Questions Ready:</strong> {}</p>'
+                '<p style="margin: 4px 0 0 0;"><strong>Room Players:</strong> {}</p>'
+                '<p style="margin: 4px 0 0 0; color: #666;"><small>Game will activate when host clicks "Start Game"</small></p>'
+                '</div>',
+                obj.total_questions,
+                obj.room.players.count()
+            )
+
         stats = obj.scores.aggregate(
             total_players=Count('id'),
             avg_score=Avg('total_score')
         )
 
         total_answers = Answer.objects.filter(question__game=obj).count()
+        avg_score = stats['avg_score'] or 0
 
         return format_html(
             '<div style="background: #f8f9fa; padding: 15px; border-radius: 5px;">'
             '<p><strong>Players:</strong> {}</p>'
-            '<p><strong>Avg Score:</strong> {:.1f} points</p>'
+            '<p><strong>Avg Score:</strong> {} points</p>'
             '<p><strong>Total Answers:</strong> {}</p>'
             '<p><strong>Questions:</strong> {}</p>'
             '</div>',
             stats['total_players'] or 0,
-            stats['avg_score'] or 0,
+            f'{avg_score:.1f}',
             total_answers,
             obj.total_questions
         )
@@ -210,7 +249,7 @@ class GameAdmin(TimeStampedAdmin):
 @admin.register(Question)
 class QuestionAdmin(TimeStampedAdmin):
     """Enhanced admin interface for Question model."""
-    list_display = ['question_number', 'game_code', 'items_preview', 'options_count', 'has_hint', 'time_limit', 'answer_stats', 'created_at']
+    list_display = ['question_number', 'game_code', 'game_status', 'items_preview', 'options_count', 'has_hint', 'time_limit', 'answer_stats', 'created_at']
     search_fields = ['correct_answer', 'game__room__code', 'hint']
     list_filter = ['game__status', 'time_limit', 'created_at']
     readonly_fields = ['id', 'answer_statistics', 'created_at', 'updated_at']
@@ -251,6 +290,25 @@ class QuestionAdmin(TimeStampedAdmin):
         )
     game_code.short_description = 'Game'
 
+    def game_status(self, obj):
+        """Display game status with icon."""
+        colors = {
+            'pending': '#FF9800',
+            'active': '#2196F3',
+            'completed': '#4CAF50',
+        }
+        icons = {
+            'pending': '⏳',
+            'active': '▶️',
+            'completed': '✅',
+        }
+        return format_html(
+            '<span style="color: {};">{}</span>',
+            colors.get(obj.game.status, 'gray'),
+            icons.get(obj.game.status, '❓')
+        )
+    game_status.short_description = 'Status'
+
     def items_preview(self, obj):
         """Show preview of items."""
         if obj.items:
@@ -281,14 +339,17 @@ class QuestionAdmin(TimeStampedAdmin):
 
     def answer_stats(self, obj):
         """Show answer statistics."""
+        if obj.game.status == 'pending':
+            return format_html('<span style="color: #FF9800;">⏳ Not started</span>')
+
         total = obj.answers.count()
         if total > 0:
             correct = obj.answers.filter(is_correct=True).count()
             percentage = (correct / total) * 100
             color = 'green' if percentage >= 50 else 'orange' if percentage >= 25 else 'red'
             return format_html(
-                '<span style="color: {};">{}/{}</span> <small>({:.0f}%)</small>',
-                color, correct, total, percentage
+                '<span style="color: {};">{}/{}</span> <small>({}%)</small>',
+                color, correct, total, f'{percentage:.0f}'
             )
         return '-'
     answer_stats.short_description = 'Answers (Correct/Total)'
@@ -297,6 +358,14 @@ class QuestionAdmin(TimeStampedAdmin):
         """Detailed answer statistics."""
         if not obj.id:
             return '-'
+
+        if obj.game.status == 'pending':
+            return format_html(
+                '<div style="background: #FFF3E0; padding: 15px; border-radius: 5px; border: 2px solid #FF9800;">'
+                '<p style="color: #E65100; font-weight: bold;">⏳ Pre-generated Question</p>'
+                '<p>No answers yet - game has not started</p>'
+                '</div>'
+            )
 
         answers = obj.answers.all()
         total = answers.count()
@@ -308,28 +377,31 @@ class QuestionAdmin(TimeStampedAdmin):
         with_hint = answers.filter(used_hint=True).count()
         avg_time = answers.aggregate(Avg('time_taken'))['time_taken__avg'] or 0
 
+        correct_pct = (correct/total)*100
+        hint_pct = (with_hint/total)*100 if total > 0 else 0
+
         return format_html(
             '<div style="background: #f8f9fa; padding: 15px; border-radius: 5px;">'
             '<p><strong>Total Answers:</strong> {}</p>'
-            '<p><strong>Correct:</strong> {} ({:.1f}%)</p>'
-            '<p><strong>Used Hint:</strong> {} ({:.1f}%)</p>'
-            '<p><strong>Avg Time:</strong> {:.1f}s</p>'
+            '<p><strong>Correct:</strong> {} ({}%)</p>'
+            '<p><strong>Used Hint:</strong> {} ({}%)</p>'
+            '<p><strong>Avg Time:</strong> {}s</p>'
             '</div>',
             total,
-            correct, (correct/total)*100,
-            with_hint, (with_hint/total)*100 if total > 0 else 0,
-            avg_time
+            correct, f'{correct_pct:.1f}',
+            with_hint, f'{hint_pct:.1f}',
+            f'{avg_time:.1f}'
         )
     answer_statistics.short_description = 'Answer Statistics'
 
 
 @admin.register(Answer)
 class AnswerAdmin(TimeStampedAdmin):
-    """Enhanced admin interface for Answer model."""
+    """Enhanced admin interface for Answer model with CORRECT points system."""
     list_display = ['player_name', 'question_display', 'answer_preview', 'result_display', 'hint_used', 'points_display', 'time_display', 'created_at']
     search_fields = ['player__username', 'answer_text', 'question__game__room__code']
     list_filter = ['is_correct', 'used_hint', 'created_at', 'question__game__status']
-    readonly_fields = ['id', 'points_earned', 'correctness_display', 'created_at', 'updated_at']
+    readonly_fields = ['id', 'points_earned', 'correctness_display', 'points_explanation', 'created_at', 'updated_at']
     date_hierarchy = 'created_at'
 
     fieldsets = (
@@ -337,7 +409,7 @@ class AnswerAdmin(TimeStampedAdmin):
             'fields': ('id', 'player', 'question', 'answer_text', 'correctness_display')
         }),
         ('Performance', {
-            'fields': ('time_taken', 'used_hint', 'points_earned')
+            'fields': ('time_taken', 'used_hint', 'points_earned', 'points_explanation')
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
@@ -385,13 +457,35 @@ class AnswerAdmin(TimeStampedAdmin):
     hint_used.short_description = 'Hint'
 
     def points_display(self, obj):
-        """Display points with color."""
+        """Display points with color - CORRECT SYSTEM."""
         color = 'green' if obj.points_earned > 0 else 'red' if obj.points_earned < 0 else 'gray'
         return format_html(
-            '<span style="color: {}; font-weight: bold;">{:+d}</span>',
+            '<span style="color: {}; font-weight: bold; font-size: 16px;">{:+d}</span>',
             color, obj.points_earned
         )
     points_display.short_description = 'Points'
+
+    def points_explanation(self, obj):
+        """Explain the points calculation."""
+        explanations = {
+            10: '✅ Correct answer WITHOUT hint → +10 points',
+            5: '✅ Correct answer WITH hint → +5 points',
+            0: '❌ Wrong answer WITHOUT hint → 0 points (no penalty)',
+            -5: '❌ Wrong answer WITH hint → -5 points (penalty)',
+        }
+
+        explanation = explanations.get(obj.points_earned, 'Unknown scoring')
+
+        bg_color = '#d4edda' if obj.points_earned > 0 else '#f8d7da' if obj.points_earned < 0 else '#f8f9fa'
+        text_color = '#155724' if obj.points_earned > 0 else '#721c24' if obj.points_earned < 0 else '#6c757d'
+
+        return format_html(
+            '<div style="background: {}; padding: 10px; border-radius: 5px; color: {};">'
+            '<strong>{}</strong>'
+            '</div>',
+            bg_color, text_color, explanation
+        )
+    points_explanation.short_description = 'Points System'
 
     def time_display(self, obj):
         """Display time taken with color coding."""
@@ -425,7 +519,7 @@ class AnswerAdmin(TimeStampedAdmin):
 @admin.register(GameScore)
 class GameScoreAdmin(TimeStampedAdmin):
     """Enhanced admin interface for GameScore model."""
-    list_display = ['rank_display', 'player_name', 'game_code', 'score_display', 'answers_display', 'hints_display', 'accuracy_display', 'created_at']
+    list_display = ['rank_display', 'player_name', 'game_code', 'game_status', 'score_display', 'answers_display', 'hints_display', 'accuracy_display', 'created_at']
     search_fields = ['player__username', 'game__room__code']
     list_filter = ['rank', 'created_at', 'game__status']
     readonly_fields = ['id', 'score_breakdown', 'created_at', 'updated_at']
@@ -473,6 +567,25 @@ class GameScoreAdmin(TimeStampedAdmin):
         )
     game_code.short_description = 'Game'
 
+    def game_status(self, obj):
+        """Display game status."""
+        colors = {
+            'pending': '#FF9800',
+            'active': '#2196F3',
+            'completed': '#4CAF50',
+        }
+        icons = {
+            'pending': '⏳',
+            'active': '▶️',
+            'completed': '✅',
+        }
+        return format_html(
+            '<span style="color: {};">{}</span>',
+            colors.get(obj.game.status, 'gray'),
+            icons.get(obj.game.status, '❓')
+        )
+    game_status.short_description = 'Status'
+
     def score_display(self, obj):
         """Display score with styling."""
         return format_html(
@@ -501,27 +614,42 @@ class GameScoreAdmin(TimeStampedAdmin):
         return format_html(
             '<div style="width: 100px; background: #f0f0f0; border-radius: 3px;">'
             '<div style="width: {}%; background: {}; height: 20px; border-radius: 3px; text-align: center; color: white; font-size: 11px; line-height: 20px;">'
-            '{:.0f}%'
+            '{}%'
             '</div></div>',
-            accuracy, color, accuracy
+            accuracy, color, f'{accuracy:.0f}'
         )
     accuracy_display.short_description = 'Accuracy'
 
     def score_breakdown(self, obj):
-        """Detailed score breakdown."""
+        """Detailed score breakdown with CORRECT points system explanation."""
         if not obj.id:
             return '-'
+
+        accuracy = obj.accuracy
+
+        # Calculate point breakdown
+        points_from_correct = obj.correct_answers * 10  # Assuming all correct without hint
+        # Note: This is an approximation. Real calculation would need to check each answer
 
         return format_html(
             '<div style="background: #f8f9fa; padding: 15px; border-radius: 5px;">'
             '<h3 style="margin-top: 0;">Score Breakdown</h3>'
+
+            '<div style="background: #e3f2fd; padding: 10px; margin-bottom: 10px; border-radius: 3px;">'
+            '<strong>Points System:</strong><br/>'
+            '<small>✅ Correct WITHOUT hint: +10 pts</small><br/>'
+            '<small>✅ Correct WITH hint: +5 pts</small><br/>'
+            '<small>❌ Wrong WITHOUT hint: 0 pts</small><br/>'
+            '<small>❌ Wrong WITH hint: -5 pts</small>'
+            '</div>'
+
             '<table style="width: 100%; border-collapse: collapse;">'
             '<tr style="background: #e9ecef;"><th style="padding: 8px; text-align: left;">Metric</th><th style="padding: 8px; text-align: right;">Value</th></tr>'
-            '<tr><td style="padding: 8px;">Total Score</td><td style="padding: 8px; text-align: right; font-weight: bold; color: #4CAF50;">{}</td></tr>'
-            '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Correct Answers</td><td style="padding: 8px; text-align: right; color: green;">{}</td></tr>'
-            '<tr><td style="padding: 8px;">Wrong Answers</td><td style="padding: 8px; text-align: right; color: red;">{}</td></tr>'
+            '<tr><td style="padding: 8px;">Total Score</td><td style="padding: 8px; text-align: right; font-weight: bold; color: #4CAF50; font-size: 18px;">{}</td></tr>'
+            '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Correct Answers</td><td style="padding: 8px; text-align: right; color: green;">✓ {}</td></tr>'
+            '<tr><td style="padding: 8px;">Wrong Answers</td><td style="padding: 8px; text-align: right; color: red;">✗ {}</td></tr>'
             '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Hints Used</td><td style="padding: 8px; text-align: right;">💡 {}</td></tr>'
-            '<tr><td style="padding: 8px;">Accuracy</td><td style="padding: 8px; text-align: right; font-weight: bold;">{:.1f}%</td></tr>'
+            '<tr><td style="padding: 8px;">Accuracy</td><td style="padding: 8px; text-align: right; font-weight: bold;">{}%</td></tr>'
             '<tr style="background: #f8f9fa;"><td style="padding: 8px;">Rank</td><td style="padding: 8px; text-align: right; font-weight: bold;">#{}</td></tr>'
             '</table>'
             '</div>',
@@ -529,7 +657,7 @@ class GameScoreAdmin(TimeStampedAdmin):
             obj.correct_answers,
             obj.wrong_answers,
             obj.hints_used,
-            obj.accuracy,
+            f'{accuracy:.1f}',
             obj.rank or '-'
         )
     score_breakdown.short_description = 'Breakdown'

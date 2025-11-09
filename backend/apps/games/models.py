@@ -1,9 +1,8 @@
 """
-Game models for WhatConnects - MCQ Format.
+Fixed Game model - started_at should be nullable for pending games
 """
 from django.db import models
 from django.conf import settings
-from django.utils import timezone
 from ..core.models import TimeStampedModel, UUIDModel
 
 
@@ -14,23 +13,39 @@ class GameManager(models.Manager):
         """Get active games."""
         return self.filter(status='active')
 
+    def pending(self):
+        """Get pending games."""
+        return self.filter(status='pending')
+
     def completed(self):
         """Get completed games."""
         return self.filter(status='completed')
 
 
 class Game(UUIDModel, TimeStampedModel):
-    """Game model."""
+    """Game model - represents a trivia game session."""
 
     STATUS_CHOICES = [
-        ('active', 'Active'),
-        ('completed', 'Completed'),
+        ('pending', 'Pending'),      # Questions generated, waiting to start
+        ('active', 'Active'),         # Game in progress
+        ('completed', 'Completed'),   # Game finished
     ]
 
-    room = models.ForeignKey('rooms.Room', on_delete=models.CASCADE, related_name='games')
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active', db_index=True)
+    room = models.ForeignKey(
+        'rooms.Room',
+        on_delete=models.CASCADE,
+        related_name='games'
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending',
+        db_index=True
+    )
     current_question_index = models.IntegerField(default=0)
-    started_at = models.DateTimeField(auto_now_add=True)
+
+    # FIXED: Make these nullable for pending games
+    started_at = models.DateTimeField(null=True, blank=True, db_index=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
     objects = GameManager()
@@ -39,247 +54,179 @@ class Game(UUIDModel, TimeStampedModel):
         db_table = 'games'
         ordering = ['-created_at']
         indexes = [
+            models.Index(fields=['room', 'status']),
             models.Index(fields=['status', '-created_at']),
-            models.Index(fields=['room', '-created_at']),
         ]
 
     def __str__(self):
-        return f"Game {self.id} - {self.room.code}"
+        return f"Game {self.id} - {self.room.code} ({self.status})"
 
     @property
     def total_questions(self):
-        """Get total number of questions."""
+        """Get total number of questions in this game."""
         return self.questions.count()
 
     @property
     def current_question(self):
-        """Get current question."""
-        questions = self.questions.order_by('order')
-        if self.current_question_index < questions.count():
-            return questions[self.current_question_index]
-        return None
-
-    @property
-    def is_active(self):
-        """Check if game is active."""
-        return self.status == 'active'
-
-    @property
-    def is_completed(self):
-        """Check if game is completed."""
-        return self.status == 'completed'
+        """Get the current question based on current_question_index."""
+        try:
+            return self.questions.get(order=self.current_question_index)
+        except models.ObjectDoesNotExist:
+            return None
 
     def next_question(self):
-        """
-        Move to next question.
-        Returns the new current question or None if game is complete.
-        """
+        """Move to next question and return it."""
         self.current_question_index += 1
-        if self.current_question_index >= self.total_questions:
-            self.complete_game()
-            return None
-        self.save(update_fields=['current_question_index', 'updated_at'])
+        self.save(update_fields=['current_question_index'])
         return self.current_question
 
-    def complete_game(self):
-        """Mark game as completed and update room status."""
-        if self.status == 'completed':
-            return  # Already completed
+    def start(self):
+        """Start the game - set started_at timestamp."""
+        from django.utils import timezone
+        if not self.started_at:
+            self.started_at = timezone.now()
+            self.status = 'active'
+            self.save(update_fields=['started_at', 'status'])
 
+    def complete(self):
+        """Complete the game."""
+        from django.utils import timezone
         self.status = 'completed'
         self.completed_at = timezone.now()
-        self.save(update_fields=['status', 'completed_at', 'updated_at'])
+        self.save(update_fields=['status', 'completed_at'])
 
-        # Update room status
-        self.room.status = 'completed'
-        self.room.save(update_fields=['status', 'updated_at'])
+    def save(self, *args, **kwargs):
+        """Override save to handle status transitions."""
+        # Only set started_at when game becomes active
+        if self.status == 'active' and not self.started_at:
+            from django.utils import timezone
+            self.started_at = timezone.now()
 
-    def get_player_answers(self, player):
-        """Get all answers from a specific player in this game."""
-        return Answer.objects.filter(
-            question__game=self,
-            player=player
-        ).select_related('question').order_by('question__order')
-
-    def get_leaderboard(self):
-        """Get ordered leaderboard for this game."""
-        return self.scores.select_related('player').order_by('-total_score', 'created_at')
+        super().save(*args, **kwargs)
 
 
 class Question(UUIDModel, TimeStampedModel):
-    """Question model for MCQ-based game."""
-    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name='questions')
+    """Question model for trivia questions."""
+
+    game = models.ForeignKey(
+        Game,
+        on_delete=models.CASCADE,
+        related_name='questions'
+    )
     order = models.IntegerField(db_index=True)
-    items = models.JSONField()  # List of 4 items to connect
-    options = models.JSONField()  # List of 4 MCQ options
-    correct_answer = models.CharField(max_length=200)  # The correct option text
-    hint = models.TextField(blank=True)  # Subtle hint
-    time_limit = models.IntegerField(default=30)  # seconds
+    items = models.JSONField(help_text="List of 4 items to find connection")
+    correct_answer = models.CharField(max_length=500)
+    options = models.JSONField(help_text="List of 4 multiple choice options")
+    hint = models.TextField(blank=True, null=True)
+    time_limit = models.IntegerField(default=30, help_text="Time limit in seconds")
 
     class Meta:
         db_table = 'questions'
-        ordering = ['order']
+        ordering = ['game', 'order']
         unique_together = ['game', 'order']
         indexes = [
             models.Index(fields=['game', 'order']),
         ]
 
     def __str__(self):
-        return f"Question {self.order + 1} - Game {self.game.id}"
+        return f"Question {self.order} - {self.game.room.code}"
 
-    def clean(self):
-        """Validate question data."""
-        from django.core.exceptions import ValidationError
-
-        if not isinstance(self.items, list):
-            raise ValidationError({'items': 'Items must be a list'})
-
-        if len(self.items) != 4:
-            raise ValidationError({'items': 'Must have exactly 4 items'})
-
-        if not isinstance(self.options, list):
-            raise ValidationError({'options': 'Options must be a list'})
-
-        if len(self.options) != 4:
-            raise ValidationError({'options': 'Must have exactly 4 options'})
-
-        if not self.correct_answer.strip():
-            raise ValidationError({'correct_answer': 'Answer cannot be empty'})
-
-        # Verify correct answer is in options
-        if self.correct_answer not in self.options:
-            raise ValidationError({'correct_answer': 'Correct answer must be one of the options'})
-
-    def check_answer(self, answer_text):
-        """
-        Check if an answer is correct.
-        Case-insensitive comparison with whitespace trimming.
-        """
-        return answer_text.strip().lower() == self.correct_answer.strip().lower()
-
-    @property
-    def answer_count(self):
-        """Get number of answers submitted for this question."""
-        return self.answers.count()
-
-    @property
-    def correct_answer_count(self):
-        """Get number of correct answers for this question."""
-        return self.answers.filter(is_correct=True).count()
+    def check_answer(self, answer):
+        """Check if the provided answer is correct (case-insensitive)."""
+        return answer.strip().lower() == self.correct_answer.strip().lower()
 
 
 class Answer(UUIDModel, TimeStampedModel):
-    """Answer submission model."""
-    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='answers')
-    player = models.ForeignKey('users.Player', on_delete=models.CASCADE, related_name='answers')
-    answer_text = models.CharField(max_length=200)
+    """Answer model - records player answers."""
+
+    question = models.ForeignKey(
+        Question,
+        on_delete=models.CASCADE,
+        related_name='answers'
+    )
+    player = models.ForeignKey(
+        'users.Player',
+        on_delete=models.CASCADE,
+        related_name='answers'
+    )
+    answer_text = models.CharField(max_length=500)
     is_correct = models.BooleanField(default=False, db_index=True)
-    used_hint = models.BooleanField(default=False, db_index=True)
-    time_taken = models.IntegerField()  # seconds
+    time_taken = models.IntegerField(help_text="Time taken in seconds")
+    used_hint = models.BooleanField(default=False)
     points_earned = models.IntegerField(default=0)
 
     class Meta:
         db_table = 'answers'
+        ordering = ['created_at']
         unique_together = ['question', 'player']
-        ordering = ['-created_at']
         indexes = [
             models.Index(fields=['question', 'player']),
-            models.Index(fields=['player', '-created_at']),
-            models.Index(fields=['is_correct', '-created_at']),
+            models.Index(fields=['player', 'is_correct']),
         ]
 
     def __str__(self):
-        return f"{self.player.username} - Q{self.question.order + 1}"
+        return f"{self.player.username} - Q{self.question.order}"
 
     def calculate_points(self):
-        """
-        Calculate points for this answer based on game rules:
-        - Correct answer WITHOUT hint: +10 points
-        - Correct answer WITH hint: +5 points
-        - Wrong answer WITHOUT hint: 0 points
-        - Wrong answer WITH hint: -5 points
-        - No answer: 0 points
-        """
+        """Calculate points earned for this answer."""
         if self.is_correct:
-            if self.used_hint:
-                self.points_earned = 5
-            else:
-                self.points_earned = 10
+            # Correct answer: +10 without hint, +5 with hint
+            return 5 if self.used_hint else 10
         else:
-            if self.used_hint:
-                self.points_earned = -5
-            else:
-                self.points_earned = 0
-
-        self.save(update_fields=['points_earned', 'updated_at'])
-        return self.points_earned
-
-
-class GameScoreManager(models.Manager):
-    """Custom manager for GameScore model."""
-
-    def get_ranked_scores(self, game):
-        """Get scores with rankings for a game."""
-        return self.filter(game=game).order_by('-total_score', 'created_at')
-
-    def top_players(self, game, limit=10):
-        """Get top N players for a game."""
-        return self.get_ranked_scores(game)[:limit]
+            # Wrong answer: -5 with hint, 0 without hint
+            return -5 if self.used_hint else 0
 
 
 class GameScore(UUIDModel, TimeStampedModel):
-    """Player scores for a game."""
-    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name='scores')
-    player = models.ForeignKey('users.Player', on_delete=models.CASCADE, related_name='game_scores')
+    """Game score model - tracks player scores per game."""
+
+    game = models.ForeignKey(
+        Game,
+        on_delete=models.CASCADE,
+        related_name='scores'
+    )
+    player = models.ForeignKey(
+        'users.Player',
+        on_delete=models.CASCADE,
+        related_name='game_scores'
+    )
     total_score = models.IntegerField(default=0, db_index=True)
     correct_answers = models.IntegerField(default=0)
     wrong_answers = models.IntegerField(default=0)
     hints_used = models.IntegerField(default=0)
     rank = models.IntegerField(null=True, blank=True, db_index=True)
 
-    objects = GameScoreManager()
-
     class Meta:
         db_table = 'game_scores'
-        unique_together = ['game', 'player']
         ordering = ['-total_score', 'created_at']
+        unique_together = ['game', 'player']
         indexes = [
             models.Index(fields=['game', '-total_score']),
             models.Index(fields=['player', '-total_score']),
         ]
 
     def __str__(self):
-        return f"{self.player.username} - Game {self.game.id}: {self.total_score} pts"
+        return f"{self.player.username} - {self.total_score} pts"
 
     @property
     def accuracy(self):
         """Calculate accuracy percentage."""
-        total_answers = self.correct_answers + self.wrong_answers
-        if total_answers == 0:
+        total = self.correct_answers + self.wrong_answers
+        if total == 0:
             return 0
-        return round((self.correct_answers / total_answers) * 100, 2)
+        return round((self.correct_answers / total) * 100, 2)
 
     def update_score(self, answer):
-        """
-        Update score based on answer.
+        """Update score based on an answer."""
+        points = answer.calculate_points()
+        self.total_score += points
 
-        Args:
-            answer: Answer instance
-        """
-        self.total_score += answer.points_earned
         if answer.is_correct:
             self.correct_answers += 1
         else:
             self.wrong_answers += 1
+
         if answer.used_hint:
             self.hints_used += 1
-        self.save(update_fields=['total_score', 'correct_answers', 'wrong_answers', 'hints_used', 'updated_at'])
 
-    def reset_score(self):
-        """Reset score to zero (useful for game restarts)."""
-        self.total_score = 0
-        self.correct_answers = 0
-        self.wrong_answers = 0
-        self.hints_used = 0
-        self.rank = None
-        self.save()
+        self.save(update_fields=['total_score', 'correct_answers', 'wrong_answers', 'hints_used'])
